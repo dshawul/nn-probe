@@ -1,8 +1,13 @@
 #include <stdio.h>
 #include <cstring>
+#include <thread>
+#include <chrono>
 #include "nnprobe.h"
 
 void silly_init(float*, bool);
+void thread_proc(int);
+static bool cache = false;
+static int device_type = _CPU;
 
 int main(int argc, char** argv) {
 
@@ -20,9 +25,8 @@ int main(int argc, char** argv) {
 
   /* loading options */
   int cache_size = 4194304;
-  int device_type = _CPU;
   int n_devices = 1;
-  int max_threads = 1;
+  int max_threads = 32;
   int float_type = _FLOAT;
   int delay = 0;
 
@@ -38,13 +42,56 @@ int main(int argc, char** argv) {
        cache_size, device_type, n_devices,
        max_threads, float_type, delay, 0
   );
-  load_neural_network(
-       network,
-       input_names, output_names, input_shapes, output_sizes, 
-       cache_size, device_type, n_devices,
-       max_threads, float_type, delay, 1
-  );
-  
+ 
+  /* create max threads */
+  std::thread myThreads[max_threads];
+  printf("===============================================================\n");  
+  printf("Create 32 threads each with a delay of 0.5 seconds for visualizing.\n"
+          "Note that evaluation will not begin until all threads call probe.\n");
+  printf("===============================================================\n");  
+  for(int i = 0; i < max_threads; i++) {
+     std::this_thread::sleep_for(std::chrono::milliseconds(500));
+     myThreads[i] = std::thread(thread_proc, i);
+  }
+  for(int i = 0; i < max_threads; i++)
+     myThreads[i].join();
+
+  printf("===============================================================\n");  
+  printf("Now use only 10 threads and see if it evaluates immediately...\n");
+  printf("===============================================================\n");  
+  for(int i = 0; i < 10; i++) {
+     myThreads[i] = std::thread(thread_proc, i);
+     std::this_thread::sleep_for(std::chrono::milliseconds(500));
+  }
+  printf("===============================================================\n");  
+  printf("Waiting for 10 seconds to see if evaluation occurs...\n");
+  printf("===============================================================\n");  
+  std::this_thread::sleep_for(std::chrono::milliseconds(10000));
+  printf("Nope, so forcing evaluation now.\n");
+  printf("===============================================================\n");  
+  set_num_active_searchers(10);
+  for(int i = 0; i < 10; i++)
+     myThreads[i].join();
+  printf("===============================================================\n");  
+  printf("However, cached values could be returned immediately so beware.\n");
+  printf("So debug your code with cache turned off first.\n");
+  printf("===============================================================\n");  
+  cache = true;
+  for(int i = 0; i < 10; i++) {
+     std::this_thread::sleep_for(std::chrono::milliseconds(500));
+     myThreads[i] = std::thread(thread_proc, i);
+  }
+  for(int i = 0; i < 10; i++)
+     myThreads[i].join();
+  printf("===============================================================\n");  
+  printf("Finished multi-threaded test.\n");
+  printf("===============================================================\n");  
+
+  return 0;
+}
+
+void thread_proc(int id) {
+
   /* buffers = initialized to 0 */
   float* main_input = new float[24 * 8 * 8];
   float* aux_input = new float[5 * 1 * 1];
@@ -65,7 +112,9 @@ int main(int argc, char** argv) {
   float* inputs[2] = {main_input, aux_input};
   float* outputs[2] = {value_head,policy_head};
   uint64_t hkey = (uint64_t)(0x44c3964f82358793);
-  bool hard_probe = false;
+  bool hard_probe = !cache;
+
+  printf("[Thread %2d] probing neural.\n", id );
 
   probe_neural_network(
       inputs, outputs,
@@ -75,19 +124,7 @@ int main(int argc, char** argv) {
 
   float p = value_head[0] * 1.0 + value_head[1] * 0.5;
   
-  printf("Net 0: Winning probability %.6f\n", p );
-
-  probe_neural_network(
-      inputs, outputs,
-      out_size, out_index,
-      hkey, hard_probe, 1
-  );
-
-  p = value_head[0] * 1.0 + value_head[1] * 0.5;
-  
-  printf("Net 1: Winning probability %.6f\n", p );
-
-  return 0;
+  printf("[Thread %2d] Winning probability %.6f\n", id, p );
 }
 
 void silly_init(float* main_input, bool NCHW) {

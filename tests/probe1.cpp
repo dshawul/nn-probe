@@ -36,7 +36,7 @@ int main(int argc, char** argv) {
        network,
        input_names, output_names, input_shapes, output_sizes, 
        cache_size, device_type, n_devices,
-       max_threads, float_type, delay
+       max_threads, float_type, delay, 0
   );
   
   /* buffers = initialized to 0 */
@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
   probe_neural_network(
       inputs, outputs,
       out_size, out_index,
-      hkey, hard_probe
+      hkey, hard_probe, 0
   );
 
   float p = value_head[0] * 1.0 + value_head[1] * 0.5;

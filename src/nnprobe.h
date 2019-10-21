@@ -36,9 +36,10 @@ DLLExport void _CDECL load_neural_network(
     int max_threads = 1,          /** maximum number of threads simultaneoulsy probing neural network.
                                       This value is used to set the batch size. */
     int float_type = _FLOAT,      /** Precision type for nn evaluation: 0=full 1=half 2=int8 precisions */
-    int delay = 0                 /** Threads are kept spinning in a loop with sleeping dely ms every iteration 
+    int delay = 0,                /** Threads are kept spinning in a loop with sleeping dely ms every iteration 
                                     It maybe useful to set this value to 1 or more, when the number of
                                     threads is much more than number of cpu cores. */
+    int nn_id = 0                 /** identifier in case of multiple nets */
 );
 /**
  Probe neural network and return result in output buffer.
@@ -51,10 +52,12 @@ DLLExport void _CDECL probe_neural_network(
     float** inputs,                 /** multiple input buffers for neural network */
     float** outputs,                /** mulitple output buffers for nerual network */
     int* out_size,                  /** size of output buffers */
+
     unsigned short** out_index = 0, /** mulitple short arrays for fetching a subset of the outputs, 
                                         set to null (0) to get all output */ 
     uint64_t hash_key = 0,          /** 64-bit key used for caching neural network */
-    bool hard_probe = false         /** Do not return cached value if set to true */
+    bool hard_probe = false,        /** Do not return cached value if set to true */
+    int nn_id = 0                   /** identifier in case of multiple nets */
 );
 /**
  Set the number of active threads that will request nn evaluation.

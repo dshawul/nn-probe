@@ -25,11 +25,6 @@
 
 #include "my_types.h"
 
-static std::vector<std::string> input_layer_names;
-static std::vector<std::string> output_layer_names;
-static std::vector<std::tuple<int,int,int>> input_layer_shapes;
-static std::vector<int> output_layer_sizes;
-
 static int N_DEVICES;
 static int BATCH_SIZE;
 static int n_searchers;
@@ -41,10 +36,32 @@ static int floatPrecision = 1;
 static LOCK global_lock;
 
 /*
+Neural network properties
+*/
+struct NeuralNet {
+    std::vector<std::string> input_layer_names;
+    std::vector<std::string> output_layer_names;
+    std::vector<std::tuple<int,int,int>> input_layer_shapes;
+    std::vector<int> output_layer_sizes;
+    char path[256];
+
+    UBMP64* nn_cache;
+    UBMP32 nn_cache_mask;
+    UBMP32 hash_entry_sz;
+
+    void allocate_nn_cache(UBMP32 sizeb);
+    void store_nn_cache(const UBMP64 hash_key,  unsigned short** const p_index,
+                           int* const p_size, float** const p_outputs);
+    bool retrieve_nn_cache(const UBMP64 hash_key, unsigned short** const p_index,
+                              int* const p_size, float** p_outputs);
+};
+
+/*
   Network model
 */
 class Model {
 public:
+    NeuralNet* pnn;
     float*** p_outputs;
     unsigned short*** p_index;
     int** p_size;
@@ -53,8 +70,9 @@ public:
     VOLATILE int n_batch_i;
     VOLATILE int n_finished_threads;
     int id;
-    Model() {
-        const int NOUT = output_layer_names.size();
+    Model(NeuralNet* pnn_) {
+        pnn = pnn_;
+        const int NOUT = pnn->output_layer_names.size();
         p_outputs = new float**[NOUT];
         p_index = new unsigned short**[NOUT];
         p_size = new int*[NOUT];
@@ -74,14 +92,12 @@ public:
     virtual float* get_input_buffer(int) = 0;
     virtual int get_input_size(int) = 0;
     virtual void predict() = 0;
-    virtual void LoadGraph(const std::string&, int, int) = 0;
-    static char path[256];
+    virtual void LoadGraph(int, int) = 0;
     static int dev_type;
 };
-char Model::path[256];
 int Model::dev_type;
 
-static Model** netModel;
+static Model** netModel[16];
 
 /*
   TensorFlow model
@@ -94,9 +110,9 @@ class TfModel : public Model {
     Tensor** input_layers;
     Session* session;
 public:
-    TfModel();
+    TfModel(NeuralNet*);
     ~TfModel();
-    void LoadGraph(const std::string& graph_file_name, int dev_id, int dev_type);
+    void LoadGraph(int dev_id, int dev_type);
     void predict();
     float* get_input_buffer(int idx) {
         return (float*)(input_layers[idx]->tensor_data().data());
@@ -106,21 +122,21 @@ public:
     }
 };
 
-TfModel::TfModel() : Model() {
-    input_layers = new Tensor*[input_layer_names.size()];
+TfModel::TfModel(NeuralNet* pnn_) : Model(pnn_) {
+    input_layers = new Tensor*[pnn->input_layer_names.size()];
 }
 TfModel::~TfModel() {
-    for(int n = 0; n < input_layer_names.size(); n++) {
+    for(int n = 0; n < pnn->input_layer_names.size(); n++) {
         delete[] input_layers[n];
     }
     delete[] input_layers;
 }
-void TfModel::LoadGraph(const std::string& graph_file_name, int dev_id, int dev_type) {
+void TfModel::LoadGraph(int dev_id, int dev_type) {
     Model::id = dev_id;
 
     GraphDef graph_def;
     Status load_graph_status =
-        ReadBinaryProto(Env::Default(), graph_file_name, &graph_def);
+        ReadBinaryProto(Env::Default(), pnn->path, &graph_def);
 
     std::string dev_name = ((dev_type == _GPU) ? "/gpu:" : "/cpu:") + std::to_string(dev_id);
     graph::SetDefaultDevice(dev_name, &graph_def);
@@ -128,8 +144,8 @@ void TfModel::LoadGraph(const std::string& graph_file_name, int dev_id, int dev_
     fflush(stdout);
 
     for (auto &node: *graph_def.mutable_node()) {
-        for(int n = 0; n < input_layer_names.size(); n++) {
-            if(node.name() == input_layer_names[n]) {
+        for(int n = 0; n < pnn->input_layer_names.size(); n++) {
+            if(node.name() == pnn->input_layer_names[n]) {
                 TensorShape nshape({BATCH_SIZE});
                 auto shape = node.attr().at("shape").shape();
                 printf("%d. %s = ", n, node.name().c_str());
@@ -141,8 +157,8 @@ void TfModel::LoadGraph(const std::string& graph_file_name, int dev_id, int dev_
                 input_layers[n] = new Tensor(DT_FLOAT, nshape);
             }
         }
-        for(int n = 0; n < output_layer_names.size(); n++) {
-            if(node.name() == output_layer_names[n]) {
+        for(int n = 0; n < pnn->output_layer_names.size(); n++) {
+            if(node.name() == pnn->output_layer_names[n]) {
                 printf("%d. %s", n, node.name().c_str());
                 printf("\n");
             }
@@ -168,17 +184,17 @@ void TfModel::predict() {
     std::vector<std::pair<std::string, Tensor> > inps;
     std::vector<std::string> outs;
 
-    for(int n = 0; n < input_layer_names.size(); n++) {
+    for(int n = 0; n < pnn->input_layer_names.size(); n++) {
         std::pair<std::string, Tensor> pr( 
-            input_layer_names[n], *(input_layers[n]) );
+            pnn->input_layer_names[n], *(input_layers[n]) );
         inps.push_back(pr);
     }
-    for(int n = 0; n < output_layer_names.size(); n++)
-        outs.push_back(output_layer_names[n]);
+    for(int n = 0; n < pnn->output_layer_names.size(); n++)
+        outs.push_back(pnn->output_layer_names[n]);
 
     TF_CHECK_OK( session->Run(inps, outs, {}, &outputs) );
 
-    for(int k = 0; k < output_layer_names.size(); k++) {
+    for(int k = 0; k < pnn->output_layer_names.size(); k++) {
         auto pp = outputs[k].matrix<float>();
 
         if(p_index[k][0] == 0) {
@@ -209,15 +225,17 @@ using namespace nvuffparser;
 using namespace nvinfer1;
 
 class Int8CacheCalibrator : public IInt8EntropyCalibrator {
+  NeuralNet* pnn;
 public:
 
-  Int8CacheCalibrator() {
+  Int8CacheCalibrator(NeuralNet* pnn_) {
+    pnn = pnn_;
 
     void* buf;
-    for(int n = 0; n < input_layer_names.size(); n++) {
-        size_t sz = std::get<0>(input_layer_shapes[n]) *
-                    std::get<1>(input_layer_shapes[n]) *
-                    std::get<2>(input_layer_shapes[n]);
+    for(int n = 0; n < pnn->input_layer_names.size(); n++) {
+        size_t sz = std::get<0>(pnn->input_layer_shapes[n]) *
+                    std::get<1>(pnn->input_layer_shapes[n]) *
+                    std::get<2>(pnn->input_layer_shapes[n]);
         cudaMalloc(&buf, CAL_BATCH_SIZE * sizeof(float) * sz);
         buffers.push_back(buf);
         buf = (float*) malloc(CAL_BATCH_SIZE * sizeof(float) * sz);
@@ -237,7 +255,7 @@ public:
   }
 
   ~Int8CacheCalibrator() override {
-    for(int n = 0; n < input_layer_names.size(); n++) {
+    for(int n = 0; n < pnn->input_layer_names.size(); n++) {
         cudaFree(buffers[n]);
         free(buffers_h[n]);
     }
@@ -256,19 +274,19 @@ public:
     std::cout << "Calibrating on Batch " << counter + 1 << " of " << NUM_CAL_BATCH << "\r";
 
     for(int i = 0; i < CAL_BATCH_SIZE; i++) {
-        for(int n = 0; n < input_layer_names.size(); n++) {
-            size_t sz = std::get<0>(input_layer_shapes[n]) *
-                        std::get<1>(input_layer_shapes[n]) *
-                        std::get<2>(input_layer_shapes[n]);
+        for(int n = 0; n < pnn->input_layer_names.size(); n++) {
+            size_t sz = std::get<0>(pnn->input_layer_shapes[n]) *
+                        std::get<1>(pnn->input_layer_shapes[n]) *
+                        std::get<2>(pnn->input_layer_shapes[n]);
             float* p = ((float*)buffers_h[n]) + i * sz;
             fread(p, 1, sizeof(float) * sz, epd_file);
         }
     }
 
-    for(int n = 0; n < input_layer_names.size(); n++) {
-        size_t sz = std::get<0>(input_layer_shapes[n]) *
-                    std::get<1>(input_layer_shapes[n]) *
-                    std::get<2>(input_layer_shapes[n]);
+    for(int n = 0; n < pnn->input_layer_names.size(); n++) {
+        size_t sz = std::get<0>(pnn->input_layer_shapes[n]) *
+                    std::get<1>(pnn->input_layer_shapes[n]) *
+                    std::get<2>(pnn->input_layer_shapes[n]);
         cudaMemcpy(buffers[n], buffers_h[n], 
             CAL_BATCH_SIZE * sizeof(float) * sz, cudaMemcpyHostToDevice);
         bindings[n] = buffers[n];
@@ -316,9 +334,9 @@ class TrtModel : public Model {
     std::vector<int> inp_index;
     std::vector<int> out_index;
 public:
-    TrtModel();
+    TrtModel(NeuralNet*);
     ~TrtModel();
-    void LoadGraph(const std::string& uff_file_name, int dev_id, int dev_type);
+    void LoadGraph(int dev_id, int dev_type);
     void predict();
     float* get_input_buffer(int idx) {
         return buffers_h[inp_index[idx]];
@@ -328,7 +346,7 @@ public:
     }
 };
 
-TrtModel::TrtModel() : Model() {
+TrtModel::TrtModel(NeuralNet* pnn_) : Model(pnn_) {
     context = 0;
     engine = 0;
     numBindings = 0;
@@ -346,7 +364,7 @@ TrtModel::~TrtModel() {
     cudaFreeHost(buffers_h[0]);
 }
 
-void TrtModel::LoadGraph(const std::string& uff_file_name, int dev_id, int dev_type) {
+void TrtModel::LoadGraph(int dev_id, int dev_type) {
     std::string dev_name = ((dev_type == _GPU) ? "/gpu:" : "/cpu:") + std::to_string(dev_id);
     printf("Loading graph on %s\n",dev_name.c_str());
     fflush(stdout);
@@ -354,26 +372,39 @@ void TrtModel::LoadGraph(const std::string& uff_file_name, int dev_id, int dev_t
     Model::id = dev_id;
     cudaSetDevice(Model::id);
 
-    std::string trtName = uff_file_name + "." + 
+    std::string trtName = std::string(pnn->path) + "." + 
                           std::to_string(BATCH_SIZE)+ "_" + 
                           std::to_string(floatPrecision) +
                           ".trt";
     std::ifstream ifs(trtName.c_str(), std::ios::in | std::ios::binary);
 
+    /*wait until gpu-0 writes trt file*/
+    static VOLATILE int is_ready = 0;
+    if(!ifs.is_open()) {
+        if(Model::id == 0)
+            is_ready = 0;
+        else  {
+            while(!is_ready)
+                t_sleep(10);
+            ifs.open(trtName.c_str(), std::ios::in | std::ios::binary);
+        }
+    }
+
+    /*generate or read trt file*/
     if (!ifs.is_open()) {
 
         IUffParser* parser;
         parser = createUffParser();
 
-        for(int n = 0; n < input_layer_names.size(); n++)
-            parser->registerInput(input_layer_names[n].c_str(), 
-                nvinfer1::DimsCHW(std::get<0>(input_layer_shapes[n]),
-                                  std::get<1>(input_layer_shapes[n]),
-                                  std::get<2>(input_layer_shapes[n])), 
+        for(int n = 0; n < pnn->input_layer_names.size(); n++)
+            parser->registerInput(pnn->input_layer_names[n].c_str(), 
+                nvinfer1::DimsCHW(std::get<0>(pnn->input_layer_shapes[n]),
+                                  std::get<1>(pnn->input_layer_shapes[n]),
+                                  std::get<2>(pnn->input_layer_shapes[n])), 
                                   UffInputOrder::kNCHW);
 
-        for(int n = 0; n < output_layer_names.size(); n++)
-            parser->registerOutput(output_layer_names[n].c_str());
+        for(int n = 0; n < pnn->output_layer_names.size(); n++)
+            parser->registerOutput(pnn->output_layer_names[n].c_str());
 
         IBuilder* builder = createInferBuilder(logger);
         if ((floatMode == nvinfer1::DataType::kINT8 && !builder->platformHasFastInt8()) 
@@ -385,12 +416,12 @@ void TrtModel::LoadGraph(const std::string& uff_file_name, int dev_id, int dev_t
         INetworkDefinition* network = builder->createNetwork();
         nvinfer1::DataType loadMode = (floatMode == nvinfer1::DataType::kINT8) ?
                             nvinfer1::DataType::kFLOAT : floatMode;
-        if(!parser->parse(uff_file_name.c_str(), *network, loadMode)) {
-            std::cout << "Fail to parse network " << uff_file_name << std::endl;
+        if(!parser->parse(pnn->path, *network, loadMode)) {
+            std::cout << "Fail to parse network " << pnn->path << std::endl;
             return;
         }
 
-        Int8CacheCalibrator calibrator;
+        Int8CacheCalibrator calibrator(pnn);
 
         if (floatMode == nvinfer1::DataType::kHALF) {
             builder->setFp16Mode(true);
@@ -413,10 +444,11 @@ void TrtModel::LoadGraph(const std::string& uff_file_name, int dev_id, int dev_t
 
         if(Model::id == 0) {
             IHostMemory *trtModelStream = engine->serialize();
-            std::ofstream ofs(trtName.c_str(), std::ios::out | std::ios::binary);
-            ofs.write((char*)(trtModelStream->data()), trtModelStream->size());
-            ofs.close();
+            FILE* out_file = fopen(trtName.c_str(),"wb");
+            fwrite((char*)(trtModelStream->data()), 1, trtModelStream->size(), out_file);
+            fclose(out_file);
             trtModelStream->destroy();
+            is_ready = 1;
         }
     } else {
         char* trtModelStream{nullptr};
@@ -474,12 +506,12 @@ void TrtModel::LoadGraph(const std::string& uff_file_name, int dev_id, int dev_t
         pHost += BATCH_SIZE * size;
     }
 
-    for(int n = 0; n < input_layer_names.size(); n++)
+    for(int n = 0; n < pnn->input_layer_names.size(); n++)
         inp_index.push_back( 
-            engine->getBindingIndex(input_layer_names[n].c_str()) );
-    for(int n = 0; n < output_layer_names.size(); n++)
+            engine->getBindingIndex(pnn->input_layer_names[n].c_str()) );
+    for(int n = 0; n < pnn->output_layer_names.size(); n++)
         out_index.push_back( 
-            engine->getBindingIndex(output_layer_names[n].c_str()) );
+            engine->getBindingIndex(pnn->output_layer_names[n].c_str()) );
 }
 void TrtModel::predict() {
 
@@ -487,7 +519,7 @@ void TrtModel::predict() {
 
     context->execute(BATCH_SIZE, buffers.data());
 
-    for(int k = 0; k < output_layer_names.size(); k++) {
+    for(int k = 0; k < pnn->output_layer_names.size(); k++) {
         int NN_MAX = buffer_sizes[out_index[k]];
         float* output = buffers_h[out_index[k]];
         
@@ -514,11 +546,8 @@ void TrtModel::predict() {
 /* 
   Neural network caching
 */
-static UBMP64* nn_cache;
-static UBMP32 nn_cache_mask;
-static UBMP32 hash_entry_sz;
 
-static void allocate_nn_cache(UBMP32 sizeb) {
+void NeuralNet::allocate_nn_cache(UBMP32 sizeb) {
     hash_entry_sz = sizeof(UBMP64);
     for(int k = 0; k < output_layer_sizes.size(); k++) {
         hash_entry_sz += output_layer_sizes[k] * 
@@ -537,7 +566,7 @@ static void allocate_nn_cache(UBMP32 sizeb) {
     fflush(stdout);
 }
 
-static void store_nn_cache(const UBMP64 hash_key,  unsigned short** const p_index,
+void NeuralNet::store_nn_cache(const UBMP64 hash_key,  unsigned short** const p_index,
                            int* const p_size, float** const p_outputs
     ) {
     UBMP32 key = UBMP32(hash_key & nn_cache_mask);
@@ -557,7 +586,7 @@ static void store_nn_cache(const UBMP64 hash_key,  unsigned short** const p_inde
     }
 }
 
-static bool retrieve_nn_cache(const UBMP64 hash_key, unsigned short** const p_index,
+bool NeuralNet::retrieve_nn_cache(const UBMP64 hash_key, unsigned short** const p_index,
                               int* const p_size, float** p_outputs
     ) {
     UBMP32 key = UBMP32(hash_key & nn_cache_mask);
@@ -599,16 +628,17 @@ static bool retrieve_nn_cache(const UBMP64 hash_key, unsigned short** const p_in
   Thread procedure for loading NN
 */
 static VOLATILE int nn_loaded = 0;
+static int nn_id_global = 0;
 static void CDECL nn_thread_proc(void* id) {
     int dev_id = *((int*)id);
-    netModel[dev_id]->LoadGraph(Model::path, dev_id, Model::dev_type);
+    netModel[nn_id_global][dev_id]->LoadGraph(dev_id, Model::dev_type);
     l_add(nn_loaded,1);
 }
 
 /*
    Initialize tensorflow
 */
-static int add_to_batch(int batch_id, float** iplanes);
+static int add_to_batch(int nn_id, int batch_id, float** iplanes);
 
 int tokenize(char *str, char** tokens, const char *str2 = " ") {
     int nu_tokens = 0;
@@ -624,7 +654,7 @@ DLLExport void CDECL load_neural_network(
     char* input_names, char* output_names,
     char* input_shapes, char* output_sizes,
     int nn_cache_size, int dev_type, int n_devices,
-    int max_threads, int float_type, int delay
+    int max_threads, int float_type, int delay, int nn_id
     ) {
 
     l_create(global_lock);
@@ -645,33 +675,40 @@ DLLExport void CDECL load_neural_network(
     BATCH_SIZE = n_searchers / N_DEVICES;
     floatPrecision = float_type;
 
+    NeuralNet* pnn = new NeuralNet();
+
     /*parse input and output node names and shapes*/
     int num_tokens;
+    char buffer[4096];
     char* commands[256];
 
-    num_tokens = tokenize(input_names,commands) - 1;
+    strcpy(buffer, input_names);
+    num_tokens = tokenize(buffer,commands) - 1;
     for(int i = 0; i < num_tokens; i++)
-        input_layer_names.push_back(commands[i]);
+        pnn->input_layer_names.push_back(commands[i]);
 
-    tokenize(input_shapes,commands);
+    strcpy(buffer, input_shapes);
+    tokenize(buffer,commands);
     for(int i = 0; i < num_tokens; i++) {
         std::tuple<int,int,int> tp(
             atoi(commands[3*i+0]),
             atoi(commands[3*i+1]),
             atoi(commands[3*i+2]) );
-        input_layer_shapes.push_back(tp);
+        pnn->input_layer_shapes.push_back(tp);
     }
 
-    num_tokens = tokenize(output_names,commands) - 1;
+    strcpy(buffer, output_names);
+    num_tokens = tokenize(buffer,commands) - 1;
     for(int i = 0; i < num_tokens; i++)
-        output_layer_names.push_back(commands[i]);
+        pnn->output_layer_names.push_back(commands[i]);
 
-    num_tokens = tokenize(output_sizes,commands) - 1;
+    strcpy(buffer, output_sizes);
+    num_tokens = tokenize(buffer,commands) - 1;
     for(int i = 0; i < num_tokens; i++)
-        output_layer_sizes.push_back(atoi(commands[i]));
+        pnn->output_layer_sizes.push_back(atoi(commands[i]));
 
     /*Allocate cache*/
-    allocate_nn_cache(nn_cache_size);
+    pnn->allocate_nn_cache(nn_cache_size);
 
     /*Message*/
     static const char* float_type_string[] = {"FLOAT", "HALF", "INT8"};
@@ -680,26 +717,27 @@ DLLExport void CDECL load_neural_network(
     fflush(stdout);
 
     /*Load tensorflow or tensorrt graphs on GPU*/
-    netModel = new Model*[N_DEVICES];
+    netModel[nn_id] = new Model*[N_DEVICES];
 #if defined(TENSORFLOW) && defined(TRT)
     if(strstr(path, ".pb") != NULL) {
         for(int i = 0; i < N_DEVICES; i++)
-            netModel[i] = new TfModel;
+            netModel[nn_id][i] = new TfModel(pnn);
     } else if(strstr(path, ".uff") != NULL) {
         for(int i = 0; i < N_DEVICES; i++)
-            netModel[i] = new TrtModel;
+            netModel[nn_id][i] = new TrtModel(pnn);
     }
 #elif defined(TENSORFLOW)
     for(int i = 0; i < N_DEVICES; i++)
-        netModel[i] = new TfModel;
+        netModel[nn_id][i] = new TfModel(pnn);
 #elif defined(TRT)
     for(int i = 0; i < N_DEVICES; i++)
-        netModel[i] = new TrtModel;
+        netModel[nn_id][i] = new TrtModel(pnn);
 #endif
 
     /*Load NN with multiple threads*/
-    strcpy(Model::path, path);
+    strcpy(pnn->path, path);
     Model::dev_type = dev_type;
+    nn_id_global = nn_id;
     int* tid = new int[N_DEVICES];
     for(int dev_id = 0; dev_id < N_DEVICES; dev_id++) {
         tid[dev_id] = dev_id;
@@ -714,13 +752,14 @@ DLLExport void CDECL load_neural_network(
     /*warm up nn*/
     for(int dev_id = 0; dev_id < N_DEVICES; dev_id++) {
         int piece = 0, square = 0;
-        Model* net = netModel[dev_id];
+        Model* net = netModel[nn_id][dev_id];
         for(int i = 0;i < BATCH_SIZE;i++)
-            add_to_batch(dev_id, 0);
+            add_to_batch(nn_id, dev_id, 0);
         net->n_batch = 0;
         net->predict();
     }
 #endif
+    nn_loaded = 0;
     /*Message*/
     printf("Neural network loaded !\t\n");
     fflush(stdout);
@@ -730,14 +769,14 @@ DLLExport void CDECL load_neural_network(
    Add position to batch
 */
 
-static int add_to_batch(int batch_id, float** iplanes) {
+static int add_to_batch(int nn_id, int batch_id, float** iplanes) {
 
     //get identifier
-    Model* net = netModel[batch_id];
+    Model* net = netModel[nn_id][batch_id];
 
     //offsets
     int offset = l_add(net->n_batch,1);
-    for(int n = 0; n < input_layer_names.size(); n++) {
+    for(int n = 0; n < net->pnn->input_layer_names.size(); n++) {
         float* pinput = net->get_input_buffer(n);
         int sz = net->get_input_size(n);
         pinput += offset * sz;
@@ -760,12 +799,13 @@ static int add_to_batch(int batch_id, float** iplanes) {
 DLLExport void  CDECL probe_neural_network(
     float** iplanes, float** p_outputs,
     int* p_size, unsigned short** p_index, 
-    UBMP64 hash_key, bool hard_probe
+    UBMP64 hash_key, bool hard_probe, int nn_id
     ) {
 
     //retrieve from cache
+    NeuralNet* pnn = netModel[nn_id][0]->pnn;
     if(!hard_probe) {
-        if(retrieve_nn_cache(hash_key,p_index,p_size,p_outputs))
+        if(pnn->retrieve_nn_cache(hash_key,p_index,p_size,p_outputs))
             return;
     }
 
@@ -774,7 +814,7 @@ DLLExport void  CDECL probe_neural_network(
     l_lock(global_lock);
     do {
         for(batch_id = chosen_device;batch_id < N_DEVICES; batch_id++) {
-            Model* net = netModel[batch_id];
+            Model* net = netModel[nn_id][batch_id];
             if(net->n_batch_i < BATCH_SIZE) {
                 net->n_batch_i++;
                 break;
@@ -789,13 +829,13 @@ DLLExport void  CDECL probe_neural_network(
     l_unlock(global_lock);
 
     //get identifier
-    Model* net = netModel[batch_id];
+    Model* net = netModel[nn_id][batch_id];
 
     //add to batch
-    int offset = add_to_batch(batch_id, iplanes);
+    int offset = add_to_batch(nn_id, batch_id, iplanes);
 
     //outputs
-    for(int i = 0; i < output_layer_names.size(); i++) {
+    for(int i = 0; i < net->pnn->output_layer_names.size(); i++) {
         net->p_index[i][offset] = p_index[i];
         net->p_size[i][offset] = p_size[i];
         net->p_outputs[i][offset] = p_outputs[i];
@@ -829,7 +869,7 @@ DLLExport void  CDECL probe_neural_network(
     }
 
     //store in cache
-    store_nn_cache(hash_key,p_index,p_size,p_outputs);
+    net->pnn->store_nn_cache(hash_key,p_index,p_size,p_outputs);
 
     //Wait until all eval calls are finished
     l_lock(global_lock);

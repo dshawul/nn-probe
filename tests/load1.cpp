@@ -34,7 +34,7 @@ int main(int argc, char** argv) {
        network,
        input_names, output_names, input_shapes, output_sizes, 
        cache_size, device_type, n_devices,
-       max_threads, float_type, delay
+       max_threads, float_type, delay, 0
   );
 
   return 0;
