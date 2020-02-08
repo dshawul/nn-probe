@@ -4,7 +4,7 @@ set -eux
 
 OS=ubuntu
 export TENSORFLOW_ROOT=${TENSORFLOW_ROOT:-~/tensorflow}
-export TensorRT_ROOT=${TensorRT_ROOT:-~/TensorRT-5.0.0.10}
+export TensorRT_ROOT=${TensorRT_ROOT:-~/TensorRT-6.0.1.5-cuda100}
 export CUDA_TOOLKIT_ROOT_DIR=${CUDA_TOOLKIT_ROOT_DIR:-/usr/local/cuda}
 
 mkdir -p nnprobe-${OS}-cpu

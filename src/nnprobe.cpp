@@ -224,7 +224,7 @@ void TfModel::predict() {
 using namespace nvuffparser;
 using namespace nvinfer1;
 
-class Int8CacheCalibrator : public IInt8EntropyCalibrator {
+class Int8CacheCalibrator : public IInt8EntropyCalibrator2 {
   NeuralNet* pnn;
 public:
 
@@ -317,7 +317,9 @@ const std::string Int8CacheCalibrator::calib_file_name = "calibrate.dat";
 
 class Logger : public ILogger {
     void log(Severity severity, const char* msg) override {
-        if (severity != Severity::kINFO)
+        if (severity != Severity::kINFO &&
+	    severity != Severity::kVERBOSE &&
+	    severity != Severity::kWARNING)
             std::cout << msg << std::endl;
     }
 };
