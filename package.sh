@@ -20,7 +20,7 @@ make
 cp libnnprobe.so ../nnprobe-${OS}-gpu/libnnprobe.so
 cd ..
 
-DLL=`ldd nnprobe-${OS}-gpu/libnnprobe.so | awk '{ print $3 }' | grep libnv`
+DLL=`ldd nnprobe-${OS}-gpu/libnnprobe.so | awk '{ print $3 }' | grep TensorRT`
 if ! [ -z "$DLL" ]; then
     cp $DLL nnprobe-${OS}-gpu
 fi

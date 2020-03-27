@@ -148,13 +148,22 @@ void TfModel::LoadGraph(int dev_id, int dev_type) {
             if(node.name() == pnn->input_layer_names[n]) {
                 TensorShape nshape({BATCH_SIZE});
                 auto shape = node.attr().at("shape").shape();
-                printf("%d. %s = ", n, node.name().c_str());
-                for (int i = 1; i < shape.dim_size(); i++) {
-                    printf("%d ",(int)shape.dim(i).size());
-                    nshape.AddDim(shape.dim(i).size());
+                std::tuple<int,int,int> shp = pnn->input_layer_shapes[n];
+
+                if(shape.dim_size() > 2) {
+                    nshape.AddDim(std::get<2>(shp));
+                    nshape.AddDim(std::get<1>(shp));
+                    nshape.AddDim(std::get<0>(shp));
+                } else {
+                    nshape.AddDim(std::get<0>(shp));
                 }
-                printf("\n");
+
                 input_layers[n] = new Tensor(DT_FLOAT, nshape);
+
+                printf("%d. %s = ", n, node.name().c_str());
+                for (int i = 1; i < shape.dim_size(); i++)
+                    printf("%d ",(int)shape.dim(i).size());
+                printf("\n");
             }
         }
         for(int n = 0; n < pnn->output_layer_names.size(); n++) {
