@@ -6,6 +6,8 @@ OS=ubuntu
 export TENSORFLOW_ROOT=${TENSORFLOW_ROOT:-~/tensorflow}
 export TensorRT_ROOT=${TensorRT_ROOT:-~/TensorRT-6.0.1.5-cuda100}
 export CUDA_TOOLKIT_ROOT_DIR=${CUDA_TOOLKIT_ROOT_DIR:-/usr/local/cuda}
+export CUDNN_PATH=${CUDNN_PATH:-/usrl/local/cudnn}
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CUDNN_PATH/lib64
 
 mkdir -p nnprobe-${OS}-cpu
 mkdir -p nnprobe-${OS}-gpu
@@ -18,6 +20,7 @@ mkdir -p build && cd build
 cmake -DTENSORFLOW=off -DTRT=on ../src
 make
 cp libnnprobe.so ../nnprobe-${OS}-gpu/libnnprobe.so
+cp device ../nnprobe-${OS}-gpu/device
 cd ..
 
 DLL=`ldd nnprobe-${OS}-gpu/libnnprobe.so | awk '{ print $3 }' | grep TensorRT`

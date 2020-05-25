@@ -8,6 +8,9 @@ set (CMAKE_CXX_STANDARD 11)
 file(GLOB SOURCES "*.cpp")
 
 add_library(nnprobe SHARED ${SOURCES})
+if(TRT)
+    add_executable(device device.cpp)
+endif()
 
 target_compile_definitions(nnprobe PRIVATE 
                          PARALLEL=1 
@@ -105,8 +108,16 @@ if(TRT)
         "${TRT_DIR}"
         "${CUDA_DIR}"
     )
+    target_include_directories(
+        device PUBLIC
+        "${TRT_DIR}"
+        "${CUDA_DIR}"
+    )
+    find_library(CUDART cudart HINTS "${CUDA_DIR}/lib64")
+    target_link_libraries(device PUBLIC "${CUDART}" )
     find_library(NVINFER nvinfer HINTS "${TRT_DIR}/lib")
     target_link_libraries(nnprobe PUBLIC "${NVINFER}" )
+    target_link_libraries(device PUBLIC "${NVINFER}" )
     find_library(NVPARSERS nvparsers HINTS "${TRT_DIR}/lib")
     target_link_libraries(nnprobe PUBLIC "${NVPARSERS}" )
 endif()
