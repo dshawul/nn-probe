@@ -26,7 +26,6 @@
 #include "my_types.h"
 
 static int N_DEVICES;
-static int BATCH_SIZE;
 static int n_searchers;
 static VOLATILE int n_active_searchers;
 static VOLATILE int chosen_device = 0;
@@ -69,9 +68,11 @@ public:
     VOLATILE int n_batch;
     VOLATILE int n_batch_i;
     VOLATILE int n_finished_threads;
+    int BATCH_SIZE;
     int id;
-    Model(NeuralNet* pnn_) {
+    Model(NeuralNet* pnn_, int batch_size_) {
         pnn = pnn_;
+        BATCH_SIZE = batch_size_;
         const int NOUT = pnn->output_layer_names.size();
         p_outputs = new float**[NOUT];
         p_index = new unsigned short**[NOUT];
@@ -110,7 +111,7 @@ class TfModel : public Model {
     Tensor** input_layers;
     Session* session;
 public:
-    TfModel(NeuralNet*);
+    TfModel(NeuralNet*, int);
     ~TfModel();
     void LoadGraph(int dev_id, int dev_type);
     void predict();
@@ -122,7 +123,7 @@ public:
     }
 };
 
-TfModel::TfModel(NeuralNet* pnn_) : Model(pnn_) {
+TfModel::TfModel(NeuralNet* pnn_, int bsize) : Model(pnn_, bsize) {
     input_layers = new Tensor*[pnn->input_layer_names.size()];
 }
 TfModel::~TfModel() {
@@ -260,7 +261,8 @@ public:
             fflush(stdout);
             exit(0);
         }
-    }
+    } else
+        epd_file = 0;
   }
 
   ~Int8CacheCalibrator() override {
@@ -345,7 +347,7 @@ class TrtModel : public Model {
     std::vector<int> inp_index;
     std::vector<int> out_index;
 public:
-    TrtModel(NeuralNet*);
+    TrtModel(NeuralNet*, int);
     ~TrtModel();
     void LoadGraph(int dev_id, int dev_type);
     void predict();
@@ -357,7 +359,7 @@ public:
     }
 };
 
-TrtModel::TrtModel(NeuralNet* pnn_) : Model(pnn_) {
+TrtModel::TrtModel(NeuralNet* pnn_, int bsize) : Model(pnn_, bsize) {
     context = 0;
     engine = 0;
     numBindings = 0;
@@ -388,18 +390,6 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
                           std::to_string(floatPrecision) +
                           ".trt";
     std::ifstream ifs(trtName.c_str(), std::ios::in | std::ios::binary);
-
-    /*wait until gpu-0 writes trt file*/
-    static VOLATILE int is_ready = 0;
-    if(!ifs.is_open()) {
-        if(Model::id == 0)
-            is_ready = 0;
-        else  {
-            while(!is_ready)
-                t_sleep(10);
-            ifs.open(trtName.c_str(), std::ios::in | std::ios::binary);
-        }
-    }
 
     /*generate or read trt file*/
     if (!ifs.is_open()) {
@@ -453,14 +443,11 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
         builder->destroy();
         parser->destroy();
 
-        if(Model::id == 0) {
-            IHostMemory *trtModelStream = engine->serialize();
-            FILE* out_file = fopen(trtName.c_str(),"wb");
-            fwrite((char*)(trtModelStream->data()), 1, trtModelStream->size(), out_file);
-            fclose(out_file);
-            trtModelStream->destroy();
-            is_ready = 1;
-        }
+        IHostMemory *trtModelStream = engine->serialize();
+        FILE* out_file = fopen(trtName.c_str(),"wb");
+        fwrite((char*)(trtModelStream->data()), 1, trtModelStream->size(), out_file);
+        fclose(out_file);
+        trtModelStream->destroy();
     } else {
         char* trtModelStream{nullptr};
         size_t size{0};
@@ -493,7 +480,7 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
         buffer_sizes.push_back(size);
 
 #if 1
-        if(dev_id == 0) {
+        if(dev_id == N_DEVICES -1) {
             printf("%d. %s %d =",i,engine->getBindingName(i),(int)size);
             for(size_t j = 0; j < d.nbDims; j++) 
                 printf(" %d",d.d[j]);
@@ -551,7 +538,6 @@ void TrtModel::predict() {
     }
 
 }
-
 #endif
 
 /* 
@@ -636,14 +622,32 @@ bool NeuralNet::retrieve_nn_cache(const UBMP64 hash_key, unsigned short** const 
 }
 
 /*
-  Thread procedure for loading NN
+  Determine minibatch sizes
 */
-static VOLATILE int nn_loaded = 0;
-static int nn_id_global = 0;
-static void CDECL nn_thread_proc(void* id) {
-    int dev_id = *((int*)id);
-    netModel[nn_id_global][dev_id]->LoadGraph(dev_id, Model::dev_type);
-    l_add(nn_loaded,1);
+void determine_minibatch_sizes(int t_batch_size, int* bsize) {
+#ifdef TRT
+    int total_mps = 0;
+    for (int i = 0; i < N_DEVICES; i++) {
+        cudaDeviceProp prop;
+        cudaGetDeviceProperties(&prop, i);
+        bsize[i] = prop.multiProcessorCount;
+        total_mps += bsize[i];
+    }
+    int tbsize = 0;
+    for (int i = 0; i < N_DEVICES; i++) {
+        bsize[i] = t_batch_size * bsize[i] / total_mps;
+        tbsize += bsize[i];
+    }
+    if(tbsize != t_batch_size) {
+        bsize[N_DEVICES - 1] += t_batch_size - tbsize;
+        printf("MiniBatch size not ideal: specified %d ideal %d\n"
+               "Please use %d for best performance\n",
+               t_batch_size, tbsize, tbsize);
+    }
+#else
+    for (int i = 0; i < N_DEVICES; i++) {
+        bsize[i] = t_batch_size / N_DEVICES;
+#endif
 }
 
 /*
@@ -683,7 +687,6 @@ DLLExport void CDECL load_neural_network(
     n_searchers = max_threads;
     N_DEVICES = n_devices;
     n_active_searchers = n_searchers;
-    BATCH_SIZE = n_searchers / N_DEVICES;
     floatPrecision = float_type;
 
     NeuralNet* pnn = new NeuralNet();
@@ -728,49 +731,46 @@ DLLExport void CDECL load_neural_network(
     fflush(stdout);
 
     /*Load tensorflow or tensorrt graphs on GPU*/
+    int* minibatch = new int[N_DEVICES];
+    determine_minibatch_sizes(n_searchers, minibatch);
+
     netModel[nn_id] = new Model*[N_DEVICES];
 #if defined(TENSORFLOW) && defined(TRT)
     if(strstr(path, ".pb") != NULL) {
         for(int i = 0; i < N_DEVICES; i++)
-            netModel[nn_id][i] = new TfModel(pnn);
+            netModel[nn_id][i] = new TfModel(pnn, minibatch[i]);
     } else if(strstr(path, ".uff") != NULL) {
         for(int i = 0; i < N_DEVICES; i++)
-            netModel[nn_id][i] = new TrtModel(pnn);
+            netModel[nn_id][i] = new TrtModel(pnn, minibatch[i]);
     }
 #elif defined(TENSORFLOW)
     for(int i = 0; i < N_DEVICES; i++)
-        netModel[nn_id][i] = new TfModel(pnn);
+        netModel[nn_id][i] = new TfModel(pnn, minibatch[i]);
 #elif defined(TRT)
     for(int i = 0; i < N_DEVICES; i++)
-        netModel[nn_id][i] = new TrtModel(pnn);
+        netModel[nn_id][i] = new TrtModel(pnn, minibatch[i]);
 #endif
+    delete[] minibatch;
 
-    /*Load NN with multiple threads*/
+    /*Load NN on each device squentially*/
     strcpy(pnn->path, path);
     Model::dev_type = dev_type;
-    nn_id_global = nn_id;
-    int* tid = new int[N_DEVICES];
-    for(int dev_id = 0; dev_id < N_DEVICES; dev_id++) {
-        tid[dev_id] = dev_id;
-        pthread_t dummy;
-        t_create(dummy,nn_thread_proc,&tid[dev_id]);
-        (void)dummy;
-    }
-    while(nn_loaded < N_DEVICES)
-        t_sleep(1);
-    delete[] tid;
+
+    for(int dev_id = 0; dev_id < N_DEVICES; dev_id++)
+        netModel[nn_id][dev_id]->LoadGraph(dev_id, Model::dev_type);
+
 #if 1
     /*warm up nn*/
     for(int dev_id = 0; dev_id < N_DEVICES; dev_id++) {
         int piece = 0, square = 0;
         Model* net = netModel[nn_id][dev_id];
-        for(int i = 0;i < BATCH_SIZE;i++)
+        for(int i = 0;i < net->BATCH_SIZE;i++)
             add_to_batch(nn_id, dev_id, 0);
         net->n_batch = 0;
         net->predict();
     }
 #endif
-    nn_loaded = 0;
+
     /*Message*/
     printf("Neural network loaded !\t\n");
     fflush(stdout);
@@ -826,7 +826,7 @@ DLLExport void  CDECL probe_neural_network(
     do {
         for(batch_id = chosen_device;batch_id < N_DEVICES; batch_id++) {
             Model* net = netModel[nn_id][batch_id];
-            if(net->n_batch_i < BATCH_SIZE) {
+            if(net->n_batch_i < net->BATCH_SIZE) {
                 net->n_batch_i++;
                 break;
             }
@@ -853,14 +853,14 @@ DLLExport void  CDECL probe_neural_network(
     }
 
     //pause threads till eval completes
-    if(offset + 1 < BATCH_SIZE) {
+    if(offset + 1 < net->BATCH_SIZE) {
 
         while(net->wait) {
             SLEEP();
 
             if(offset + 1 == net->n_batch
                && n_active_searchers < n_searchers 
-               && net->n_batch >= BATCH_SIZE - (n_searchers - n_active_searchers)
+               && net->n_batch >= net->BATCH_SIZE - (n_searchers - n_active_searchers)
                ) {
 #if 0
                     printf("\n# batchsize %d / %d workers %d / %d\n",

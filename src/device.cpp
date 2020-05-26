@@ -40,7 +40,6 @@ void display_device_properties(int count, cudaDeviceProp* props) {
         printf( "Max grid dimensions: (%d, %d, %d)\n",
                 prop.maxGridSize[0], prop.maxGridSize[1],
                 prop.maxGridSize[2] );
-        printf( "\n" );
     }
     printf("=======================================================\n");
 }
@@ -87,6 +86,7 @@ int main(int argc, char** argv) {
             IBuilder* builder = createInferBuilder(logger);
             if(!builder->platformHasFastInt8()) {
                 printf("N\n");
+                builder->destroy();
                 return 0;
             }
             builder->destroy();
@@ -109,6 +109,7 @@ int main(int argc, char** argv) {
             IBuilder* builder = createInferBuilder(logger);
             if(!builder->platformHasFastFp16()) {
                 printf("N");
+                builder->destroy();
                 return 0;
             }
             builder->destroy();
