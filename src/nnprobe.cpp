@@ -30,9 +30,11 @@ static int n_searchers;
 static VOLATILE int n_active_searchers;
 static VOLATILE int chosen_device = 0;
 static int delayms = 0;
-static int floatPrecision = 1;
 
 static LOCK global_lock;
+
+enum { FP32 = 0, FP16, FP8 };
+static const char* float_type_string[] = {"FLOAT", "HALF", "INT8"};
 
 /*
 Neural network properties
@@ -68,11 +70,13 @@ public:
     VOLATILE int n_batch;
     VOLATILE int n_batch_i;
     VOLATILE int n_finished_threads;
+    int float_type;
     int BATCH_SIZE;
     int id;
-    Model(NeuralNet* pnn_, int batch_size_) {
+    Model(NeuralNet* pnn_, int batch_size_, int float_type_) {
         pnn = pnn_;
         BATCH_SIZE = batch_size_;
+        float_type = float_type_;
         const int NOUT = pnn->output_layer_names.size();
         p_outputs = new float**[NOUT];
         p_index = new unsigned short**[NOUT];
@@ -111,7 +115,7 @@ class TfModel : public Model {
     Tensor** input_layers;
     Session* session;
 public:
-    TfModel(NeuralNet*, int);
+    TfModel(NeuralNet*, int, int);
     ~TfModel();
     void LoadGraph(int dev_id, int dev_type);
     void predict();
@@ -123,7 +127,7 @@ public:
     }
 };
 
-TfModel::TfModel(NeuralNet* pnn_, int bsize) : Model(pnn_, bsize) {
+TfModel::TfModel(NeuralNet* pnn_, int bsize, int float_type) : Model(pnn_, bsize, float_type) {
     input_layers = new Tensor*[pnn->input_layer_names.size()];
 }
 TfModel::~TfModel() {
@@ -235,93 +239,98 @@ using namespace nvuffparser;
 using namespace nvinfer1;
 
 class Int8CacheCalibrator : public IInt8EntropyCalibrator2 {
-  NeuralNet* pnn;
+  
 public:
 
-  Int8CacheCalibrator(NeuralNet* pnn_) {
-    pnn = pnn_;
+    Int8CacheCalibrator(NeuralNet* pnn_, int float_type_) {
+        pnn = pnn_;
+        float_type = float_type_;
 
-    void* buf;
-    for(int n = 0; n < pnn->input_layer_names.size(); n++) {
-        size_t sz = std::get<0>(pnn->input_layer_shapes[n]) *
-                    std::get<1>(pnn->input_layer_shapes[n]) *
-                    std::get<2>(pnn->input_layer_shapes[n]);
-        cudaMalloc(&buf, CAL_BATCH_SIZE * sizeof(float) * sz);
-        buffers.push_back(buf);
-        buf = (float*) malloc(CAL_BATCH_SIZE * sizeof(float) * sz);
-        buffers_h.push_back(buf);
-    }
+        if(float_type == FP8) {
 
-    counter = 0;
+            void* buf;
+            for(int n = 0; n < pnn->input_layer_names.size(); n++) {
+                size_t sz = std::get<0>(pnn->input_layer_shapes[n]) *
+                            std::get<1>(pnn->input_layer_shapes[n]) *
+                            std::get<2>(pnn->input_layer_shapes[n]);
+                cudaMalloc(&buf, CAL_BATCH_SIZE * sizeof(float) * sz);
+                buffers.push_back(buf);
+                buf = (float*) malloc(CAL_BATCH_SIZE * sizeof(float) * sz);
+                buffers_h.push_back(buf);
+            }
 
-    if (floatPrecision == 2) {
-        epd_file = fopen(calib_file_name.c_str(),"rb");
-        if(!epd_file) {
-            printf("Calibration file not found!\n");
-            fflush(stdout);
-            exit(0);
+            counter = 0;
+
+            epd_file = fopen(calib_file_name.c_str(),"rb");
+            if(!epd_file) {
+                printf("Calibration file not found!\n");
+                fflush(stdout);
+                exit(0);
+            }
         }
-    } else
-        epd_file = 0;
-  }
-
-  ~Int8CacheCalibrator() override {
-    for(int n = 0; n < pnn->input_layer_names.size(); n++) {
-        cudaFree(buffers[n]);
-        free(buffers_h[n]);
     }
-    if(epd_file)
-        fclose(epd_file);
-  }
-  
-  int getBatchSize() const override {
-    return CAL_BATCH_SIZE;
-  }
-  
-  bool getBatch(void* bindings[], const char* names[], int nbBindings) override {
-    if (counter >= NUM_CAL_BATCH)
-        return false;
 
-    std::cout << "Calibrating on Batch " << counter + 1 << " of " << NUM_CAL_BATCH << "\r";
+    ~Int8CacheCalibrator() override {
+        if(float_type == FP8) {
+            for(int n = 0; n < pnn->input_layer_names.size(); n++) {
+                cudaFree(buffers[n]);
+                free(buffers_h[n]);
+            }
+            if(epd_file)
+                fclose(epd_file);
+        }
+    }
 
-    for(int i = 0; i < CAL_BATCH_SIZE; i++) {
+    int getBatchSize() const override {
+        return CAL_BATCH_SIZE;
+    }
+
+    bool getBatch(void* bindings[], const char* names[], int nbBindings) override {
+        if (counter >= NUM_CAL_BATCH)
+            return false;
+
+        std::cout << "Calibrating on Batch " << counter + 1 << " of " << NUM_CAL_BATCH << "\r";
+
+        for(int i = 0; i < CAL_BATCH_SIZE; i++) {
+            for(int n = 0; n < pnn->input_layer_names.size(); n++) {
+                size_t sz = std::get<0>(pnn->input_layer_shapes[n]) *
+                            std::get<1>(pnn->input_layer_shapes[n]) *
+                            std::get<2>(pnn->input_layer_shapes[n]);
+                float* p = ((float*)buffers_h[n]) + i * sz;
+                fread(p, 1, sizeof(float) * sz, epd_file);
+            }
+        }
+
         for(int n = 0; n < pnn->input_layer_names.size(); n++) {
             size_t sz = std::get<0>(pnn->input_layer_shapes[n]) *
                         std::get<1>(pnn->input_layer_shapes[n]) *
                         std::get<2>(pnn->input_layer_shapes[n]);
-            float* p = ((float*)buffers_h[n]) + i * sz;
-            fread(p, 1, sizeof(float) * sz, epd_file);
+            cudaMemcpy(buffers[n], buffers_h[n], 
+                CAL_BATCH_SIZE * sizeof(float) * sz, cudaMemcpyHostToDevice);
+            bindings[n] = buffers[n];
         }
+
+        counter++;
+        return true;
     }
 
-    for(int n = 0; n < pnn->input_layer_names.size(); n++) {
-        size_t sz = std::get<0>(pnn->input_layer_shapes[n]) *
-                    std::get<1>(pnn->input_layer_shapes[n]) *
-                    std::get<2>(pnn->input_layer_shapes[n]);
-        cudaMemcpy(buffers[n], buffers_h[n], 
-            CAL_BATCH_SIZE * sizeof(float) * sz, cudaMemcpyHostToDevice);
-        bindings[n] = buffers[n];
+    const void* readCalibrationCache(size_t& length) override {
+        return nullptr;
     }
 
-    counter++;
-    return true;
-  }
-  
-  const void* readCalibrationCache(size_t& length) override {
-    return nullptr;
-  }
-
-  void writeCalibrationCache(const void* cache, size_t length) override {
-  }
+    void writeCalibrationCache(const void* cache, size_t length) override {
+    }
 
 private:
-  std::vector<void*> buffers;
-  std::vector<void*> buffers_h;
-  int counter;
-  FILE* epd_file;
-  static const int CAL_BATCH_SIZE = 256;
-  static const int NUM_CAL_BATCH = 10;
-  static const std::string calib_file_name;
+    NeuralNet* pnn;
+    int float_type;
+    std::vector<void*> buffers;
+    std::vector<void*> buffers_h;
+    int counter;
+    FILE* epd_file;
+    static const int CAL_BATCH_SIZE = 256;
+    static const int NUM_CAL_BATCH = 10;
+    static const std::string calib_file_name;
 };
 
 const std::string Int8CacheCalibrator::calib_file_name = "calibrate.dat";
@@ -340,14 +349,13 @@ class TrtModel : public Model {
     IExecutionContext* context;
     Logger logger;
     int numBindings;
-    nvinfer1::DataType floatMode;
     std::vector<void*> buffers;
     std::vector<float*> buffers_h;
     std::vector<int> buffer_sizes;
     std::vector<int> inp_index;
     std::vector<int> out_index;
 public:
-    TrtModel(NeuralNet*, int);
+    TrtModel(NeuralNet*, int, int);
     ~TrtModel();
     void LoadGraph(int dev_id, int dev_type);
     void predict();
@@ -359,16 +367,10 @@ public:
     }
 };
 
-TrtModel::TrtModel(NeuralNet* pnn_, int bsize) : Model(pnn_, bsize) {
+TrtModel::TrtModel(NeuralNet* pnn_, int bsize, int float_type) : Model(pnn_, bsize, float_type) {
     context = 0;
     engine = 0;
     numBindings = 0;
-    if(floatPrecision == 0)
-        floatMode = nvinfer1::DataType::kFLOAT;
-    else if(floatPrecision == 1)
-        floatMode = nvinfer1::DataType::kHALF;
-    else
-        floatMode = nvinfer1::DataType::kINT8;
 }
 
 TrtModel::~TrtModel() {
@@ -387,7 +389,7 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
 
     std::string trtName = std::string(pnn->path) + "." + 
                           std::to_string(BATCH_SIZE)+ "_" + 
-                          std::to_string(floatPrecision) +
+                          std::to_string(float_type) +
                           ".trt";
     std::ifstream ifs(trtName.c_str(), std::ios::in | std::ios::binary);
 
@@ -407,26 +409,47 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
         for(int n = 0; n < pnn->output_layer_names.size(); n++)
             parser->registerOutput(pnn->output_layer_names[n].c_str());
 
+        /*if requested precision is not supported, fallback to next available*/
         IBuilder* builder = createInferBuilder(logger);
-        if ((floatMode == nvinfer1::DataType::kINT8 && !builder->platformHasFastInt8()) 
-         || (floatMode == nvinfer1::DataType::kHALF && !builder->platformHasFastFp16())) {
-            std::cout << "Device does not support this low precision mode." << std::endl;
-            return;
+        if(float_type == FP8 && !builder->platformHasFastInt8()) {
+            if(builder->platformHasFastFp16()) {
+                float_type = FP16;
+            } else {
+                float_type = FP32;
+            }
+            printf("Switching to \"%s\" precision for GPU %d\n",
+                float_type_string[float_type], dev_id);
+            fflush(stdout);
         }
-
+        if(float_type == FP16 && !builder->platformHasFastFp16()) {
+            if(builder->platformHasFastInt8()) {
+                float_type = FP8;
+            } else {
+                float_type = FP32;
+            }
+            printf("Switching to \"%s\" precision for GPU %d\n",
+                float_type_string[float_type], dev_id);
+            fflush(stdout);
+        }
+        
+        /*create network*/
         INetworkDefinition* network = builder->createNetwork();
-        nvinfer1::DataType loadMode = (floatMode == nvinfer1::DataType::kINT8) ?
-                            nvinfer1::DataType::kFLOAT : floatMode;
+        nvinfer1::DataType loadMode;
+        if(float_type == FP16)
+            loadMode = nvinfer1::DataType::kHALF;
+        else
+            loadMode = nvinfer1::DataType::kFLOAT;
         if(!parser->parse(pnn->path, *network, loadMode)) {
             std::cout << "Fail to parse network " << pnn->path << std::endl;
             return;
         }
 
-        Int8CacheCalibrator calibrator(pnn);
+        /*create engine*/
+        Int8CacheCalibrator calibrator(pnn, float_type);
 
-        if (floatMode == nvinfer1::DataType::kHALF) {
+        if (float_type == FP16) {
             builder->setFp16Mode(true);
-        } else if (floatMode == nvinfer1::DataType::kINT8) {
+        } else if (float_type == FP8) {
             builder->setInt8Mode(true);
             builder->setInt8Calibrator(&calibrator);
         }
@@ -458,7 +481,6 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
         trtModelStream = new char[size];
         ifs.read(trtModelStream, size);
         ifs.close();
-
 
         IRuntime* infer = createInferRuntime(logger);
         engine = infer->deserializeCudaEngine(trtModelStream, size, nullptr);
@@ -643,6 +665,7 @@ void determine_minibatch_sizes(int t_batch_size, int* bsize) {
         printf("MiniBatch size not ideal: specified %d ideal %d\n"
                "Please use %d for best performance\n",
                t_batch_size, tbsize, tbsize);
+        fflush(stdout);
     }
 #else
     for (int i = 0; i < N_DEVICES; i++) {
@@ -687,7 +710,6 @@ DLLExport void CDECL load_neural_network(
     n_searchers = max_threads;
     N_DEVICES = n_devices;
     n_active_searchers = n_searchers;
-    floatPrecision = float_type;
 
     NeuralNet* pnn = new NeuralNet();
 
@@ -725,9 +747,8 @@ DLLExport void CDECL load_neural_network(
     pnn->allocate_nn_cache(nn_cache_size);
 
     /*Message*/
-    static const char* float_type_string[] = {"FLOAT", "HALF", "INT8"};
     printf("Loading neural network : %s\n",path);
-    printf("With \"%s\" precision\n", float_type_string[floatPrecision]);
+    printf("With \"%s\" precision\n", float_type_string[float_type]);
     fflush(stdout);
 
     /*Load tensorflow or tensorrt graphs on GPU*/
@@ -738,17 +759,17 @@ DLLExport void CDECL load_neural_network(
 #if defined(TENSORFLOW) && defined(TRT)
     if(strstr(path, ".pb") != NULL) {
         for(int i = 0; i < N_DEVICES; i++)
-            netModel[nn_id][i] = new TfModel(pnn, minibatch[i]);
+            netModel[nn_id][i] = new TfModel(pnn, minibatch[i], float_type);
     } else if(strstr(path, ".uff") != NULL) {
         for(int i = 0; i < N_DEVICES; i++)
-            netModel[nn_id][i] = new TrtModel(pnn, minibatch[i]);
+            netModel[nn_id][i] = new TrtModel(pnn, minibatch[i], float_type);
     }
 #elif defined(TENSORFLOW)
     for(int i = 0; i < N_DEVICES; i++)
-        netModel[nn_id][i] = new TfModel(pnn, minibatch[i]);
+        netModel[nn_id][i] = new TfModel(pnn, minibatch[i], float_type);
 #elif defined(TRT)
     for(int i = 0; i < N_DEVICES; i++)
-        netModel[nn_id][i] = new TrtModel(pnn, minibatch[i]);
+        netModel[nn_id][i] = new TrtModel(pnn, minibatch[i], float_type);
 #endif
     delete[] minibatch;
 

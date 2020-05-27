@@ -97,18 +97,17 @@ int main(int argc, char** argv) {
             cudaSetDevice(i);
             IBuilder* builder = createInferBuilder(logger);
             if(builder->platformHasFastInt8())
-                printf("Y");
+                printf("Y\n");
             else
-                printf("N");
+                printf("N\n");
             builder->destroy();
         }
-        printf("\n");
     } else if(!strcmp(argv[1],"--fp16")) {
         for (int i = 0; i < count; i++) {
             cudaSetDevice(i);
             IBuilder* builder = createInferBuilder(logger);
             if(!builder->platformHasFastFp16()) {
-                printf("N");
+                printf("N\n");
                 builder->destroy();
                 return 0;
             }
@@ -120,12 +119,11 @@ int main(int argc, char** argv) {
             cudaSetDevice(i);
             IBuilder* builder = createInferBuilder(logger);
             if(builder->platformHasFastFp16())
-                printf("Y");
+                printf("Y\n");
             else
-                printf("N");
+                printf("N\n");
             builder->destroy();
         }
-        printf("\n");
     } else if(!strcmp(argv[1],"--help") || !strcmp(argv[1],"-h")) {
         printf("Usage: device [option]\n"
                "   -h,--help    Display this help message\n"
