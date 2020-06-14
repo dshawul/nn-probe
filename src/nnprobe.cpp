@@ -31,8 +31,6 @@ static VOLATILE int n_active_searchers;
 static VOLATILE int chosen_device = 0;
 static int delayms = 0;
 
-static LOCK global_lock;
-
 enum { FP32 = 0, FP16, FP8 };
 static const char* float_type_string[] = {"FLOAT", "HALF", "INT8"};
 
@@ -66,9 +64,9 @@ public:
     float*** p_outputs;
     unsigned short*** p_index;
     int** p_size;
-    VOLATILE int wait;
     VOLATILE int n_batch;
     VOLATILE int n_batch_i;
+    VOLATILE int n_batch_eval;
     VOLATILE int n_finished_threads;
     int float_type;
     int BATCH_SIZE;
@@ -88,9 +86,9 @@ public:
         }
         n_batch = 0;
         n_batch_i = 0;
+        n_batch_eval = 0;
         n_finished_threads = 0;
         id = 0;
-        wait = 1;
     }
     ~Model() {
     }
@@ -676,7 +674,8 @@ void determine_minibatch_sizes(int t_batch_size, int* bsize) {
 /*
    Initialize tensorflow
 */
-static int add_to_batch(int nn_id, int batch_id, float** iplanes);
+static int add_to_batch(Model* net, float** iplanes, float** p_outputs,
+                        int* p_size, unsigned short** p_index);
 
 int tokenize(char *str, char** tokens, const char *str2 = " ") {
     int nu_tokens = 0;
@@ -694,8 +693,6 @@ DLLExport void CDECL load_neural_network(
     int nn_cache_size, int dev_type, int n_devices,
     int max_threads, int float_type, int delay, int nn_id
     ) {
-
-    l_create(global_lock);
 
 #ifdef _WIN32
 #   define setenv(n,v,o) _putenv_s(n,v)
@@ -786,7 +783,7 @@ DLLExport void CDECL load_neural_network(
         int piece = 0, square = 0;
         Model* net = netModel[nn_id][dev_id];
         for(int i = 0;i < net->BATCH_SIZE;i++)
-            add_to_batch(nn_id, dev_id, 0);
+            add_to_batch(net, 0, 0, 0, 0);
         net->n_batch = 0;
         net->predict();
     }
@@ -801,13 +798,22 @@ DLLExport void CDECL load_neural_network(
    Add position to batch
 */
 
-static int add_to_batch(int nn_id, int batch_id, float** iplanes) {
+static int add_to_batch(Model* net, float** iplanes, float** p_outputs,
+    int* p_size, unsigned short** p_index
+    ) {
 
-    //get identifier
-    Model* net = netModel[nn_id][batch_id];
-
-    //offsets
     int offset = l_add(net->n_batch,1);
+
+    //outputs
+    if(p_index) {
+        for(int i = 0; i < net->pnn->output_layer_names.size(); i++) {
+            net->p_index[i][offset] = p_index[i];
+            net->p_size[i][offset] = p_size[i];
+            net->p_outputs[i][offset] = p_outputs[i];
+        }
+    }
+
+    //inputs
     for(int n = 0; n < net->pnn->input_layer_names.size(); n++) {
         float* pinput = net->get_input_buffer(n);
         int sz = net->get_input_size(n);
@@ -816,7 +822,7 @@ static int add_to_batch(int nn_id, int batch_id, float** iplanes) {
             memcpy(pinput, iplanes[n], sizeof(float) * sz);
     }
 
-    return offset;
+    return offset + 1;
 }
 
 /*
@@ -841,84 +847,82 @@ DLLExport void  CDECL probe_neural_network(
             return;
     }
 
-    //choose batch id
-    int batch_id;
-    l_lock(global_lock);
-    do {
-        for(batch_id = chosen_device;batch_id < N_DEVICES; batch_id++) {
-            Model* net = netModel[nn_id][batch_id];
-            if(net->n_batch_i < net->BATCH_SIZE) {
-                net->n_batch_i++;
-                break;
+RETRY:
+    //choose GPU device
+    Model* net = 0;
+    {
+        int device_id = chosen_device;
+        while(true) {
+            net = netModel[nn_id][device_id];
+
+            if(!net->n_batch_eval && !net->n_finished_threads) {
+                if(l_add(net->n_batch_i, 1) < net->BATCH_SIZE) {
+                    l_set(chosen_device, device_id);
+                    break;
+                } else {
+                    l_add(net->n_batch_i, -1);
+                }
             }
+
+            device_id++;
+            if(device_id == N_DEVICES)
+                device_id = 0;
+            SLEEP();
         }
-        chosen_device = 0;
-    } while(batch_id + 1 > N_DEVICES);
-
-    chosen_device = batch_id + 1;
-    if(chosen_device == N_DEVICES)
-        chosen_device = 0;
-    l_unlock(global_lock);
-
-    //get identifier
-    Model* net = netModel[nn_id][batch_id];
-
-    //add to batch
-    int offset = add_to_batch(nn_id, batch_id, iplanes);
-
-    //outputs
-    for(int i = 0; i < net->pnn->output_layer_names.size(); i++) {
-        net->p_index[i][offset] = p_index[i];
-        net->p_size[i][offset] = p_size[i];
-        net->p_outputs[i][offset] = p_outputs[i];
     }
 
-    //pause threads till eval completes
-    if(offset + 1 < net->BATCH_SIZE) {
+    //add to batch
+    int n_thread_batch = add_to_batch(net, iplanes, p_outputs, p_size, p_index);
 
-        while(net->wait) {
+    //pause threads till eval completes
+    if(n_thread_batch < net->BATCH_SIZE) {
+
+        do {
+
+            //a thread reached here after we started evaluating
+            if(net->n_batch_eval && (n_thread_batch > net->n_batch_eval)) {
+                l_add(net->n_batch, -1);
+                l_add(net->n_batch_i, -1);
+                goto RETRY;
+            }
+
+            //sleep
             SLEEP();
 
-            if(offset + 1 == net->n_batch
-               && n_active_searchers < n_searchers 
+            //this is the last active thread
+            if(n_thread_batch == net->n_batch
+               && n_active_searchers < n_searchers
                && net->n_batch >= net->BATCH_SIZE - (n_searchers - n_active_searchers)
                ) {
 #if 0
-                    printf("\n# batchsize %d / %d workers %d / %d\n",
-                        net->n_batch,BATCH_SIZE,
+                    printf("\n[0] # batchsize %d / %d  = active workers %d of %d\n",
+                        net->n_batch, net->BATCH_SIZE,
                         n_active_searchers, n_searchers);
                     fflush(stdout);
 #endif
+                net->n_batch_eval = n_thread_batch;
                 net->predict();
-                net->wait = 0;
                 break;
             }
-        }
+
+        } while(net->n_finished_threads == 0);
 
     } else {
+        net->n_batch_eval = n_thread_batch;
         net->predict();
-        net->wait = 0;
+    }
+
+    //last thread to leave resets variables
+    int prev_n = l_add(net->n_finished_threads, 1) + 1;
+    if(prev_n == net->n_batch_eval) {
+        l_add(net->n_batch, -prev_n);
+        l_add(net->n_batch_i, -prev_n);
+        net->n_batch_eval = 0;
+        net->n_finished_threads = 0;
     }
 
     //store in cache
     net->pnn->store_nn_cache(hash_key,p_index,p_size,p_outputs);
-
-    //Wait until all eval calls are finished
-    l_lock(global_lock);
-    net->n_finished_threads++;
-    if(net->n_finished_threads == net->n_batch) {
-        net->wait = 1;
-        net->n_finished_threads = 0;
-        net->n_batch = 0;
-        net->n_batch_i = 0;
-    } 
-    l_unlock(global_lock);
-
-    while (net->n_finished_threads > 0 
-        && net->n_finished_threads < net->n_batch
-        ) {
-        SLEEP();
-    }
 }
 
 #undef SLEEP
