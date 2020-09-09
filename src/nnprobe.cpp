@@ -668,6 +668,7 @@ void determine_minibatch_sizes(int t_batch_size, int* bsize) {
 #else
     for (int i = 0; i < N_DEVICES; i++) {
         bsize[i] = t_batch_size / N_DEVICES;
+    }
 #endif
 }
 
