@@ -4,17 +4,15 @@ set -eux
 
 OS=ubuntu
 export TENSORFLOW_ROOT=${TENSORFLOW_ROOT:-~/tensorflow}
-export TensorRT_ROOT=${TensorRT_ROOT:-~/TensorRT-6.0.1.5-cuda100}
+export TensorRT_ROOT=${TensorRT_ROOT:-~/TensorRT-7.2.0.14-cuda110}
 export CUDA_TOOLKIT_ROOT_DIR=${CUDA_TOOLKIT_ROOT_DIR:-/usr/local/cuda}
-export CUDNN_PATH=${CUDNN_PATH:-/usrl/local/cudnn}
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CUDNN_PATH/lib64
-
-mkdir -p nnprobe-${OS}-cpu
-mkdir -p nnprobe-${OS}-gpu
+export CUDNN_PATH=${CUDNN_PATH:-~/cudnn-804}
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CUDNN_PATH/lib64:$CUDA_TOOLKIT_ROOT_DIR/lib64
 
 ##################
 # build for GPU
 ##################
+mkdir -p nnprobe-${OS}-gpu
 [ -d "build" ] && rm -rf build
 mkdir -p build && cd build
 cmake -DTENSORFLOW=off -DTRT=on ../src
@@ -35,9 +33,12 @@ if ! [ -z "$DLL" ]; then
     cp $DLL nnprobe-${OS}-gpu
 fi
 
+zip -r nnprobe-${OS}-gpu.zip nnprobe-${OS}-gpu
+
 #######################
 # build for CPU
 #######################
+mkdir -p nnprobe-${OS}-cpu
 mkdir -p $TENSORFLOW_ROOT/tensorflow/cc/nnprobe/
 cp src/*.cpp src/*.h src/BUILD $TENSORFLOW_ROOT/tensorflow/cc/nnprobe/
 cd $TENSORFLOW_ROOT
@@ -47,4 +48,3 @@ cp $TENSORFLOW_ROOT/bazel-bin/tensorflow/cc/nnprobe/libnnprobe.so nnprobe-${OS}-
 chmod 755 nnprobe-${OS}-cpu/libnnprobe.so
 
 zip -r nnprobe-${OS}-cpu.zip nnprobe-${OS}-cpu
-zip -r nnprobe-${OS}-gpu.zip nnprobe-${OS}-gpu
