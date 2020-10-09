@@ -5,9 +5,9 @@ set -eux
 OS=ubuntu
 export TENSORFLOW_ROOT=${TENSORFLOW_ROOT:-~/tensorflow}
 export TensorRT_ROOT=${TensorRT_ROOT:-~/TensorRT-7.2.0.14-cuda110}
-export CUDA_TOOLKIT_ROOT_DIR=${CUDA_TOOLKIT_ROOT_DIR:-/usr/local/cuda}
-export CUDNN_PATH=${CUDNN_PATH:-~/cudnn-804}
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CUDNN_PATH/lib64:$CUDA_TOOLKIT_ROOT_DIR/lib64
+export CUDA_ROOT=${CUDA_ROOT:-/usr/local/cuda-11.0}
+export CUDNN_ROOT=${CUDNN_ROOT:-~/cudnn-804}
+export LD_LIBRARY_PATH=$CUDNN_ROOT/lib64:$CUDA_ROOT/lib64::$TensorRT_ROOT/lib
 
 ##################
 # build for GPU
