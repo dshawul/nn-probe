@@ -3,19 +3,35 @@
 
 #include <stdint.h>
 
-enum {_CPU, _GPU};
-enum {_FLOAT, _HALF, _INT8};
+/**
+Device and precision to use
+*/
+enum devices {
+    _CPU, _GPU
+};
+enum precisions {
+    _FLOAT, _HALF, _INT8
+};
+
+/**
+* Calling convention
+*/
+#ifdef __cplusplus
+#   define EXTERNC extern "C"
+#else
+#   define EXTERNC
+#endif
 
 #if defined (_WIN32)
 #   define _CDECL __cdecl
 #ifdef DLL_EXPORT
-#   define DLLExport extern "C" __declspec(dllexport)
+#   define DLLExport EXTERNC __declspec(dllexport)
 #else
-#   define DLLExport extern "C" __declspec(dllimport)
+#   define DLLExport EXTERNC __declspec(dllimport)
 #endif
 #else
 #   define _CDECL
-#   define DLLExport extern "C"
+#   define DLLExport EXTERNC
 #endif
 
 /**
@@ -68,6 +84,5 @@ DLLExport void _CDECL set_num_active_searchers(
     int n_searchers               /** number of threads currently probing the neural network. */
 );
 
-#undef _CDECL
 #endif
 

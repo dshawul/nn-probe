@@ -44,14 +44,14 @@ struct NeuralNet {
     std::vector<int> output_layer_sizes;
     char path[256];
 
-    UBMP64* nn_cache;
-    UBMP32 nn_cache_mask;
-    UBMP32 hash_entry_sz;
+    uint64_t* nn_cache;
+    uint32_t nn_cache_mask;
+    uint32_t hash_entry_sz;
 
-    void allocate_nn_cache(UBMP32 sizeb);
-    void store_nn_cache(const UBMP64 hash_key,  unsigned short** const p_index,
+    void allocate_nn_cache(uint32_t sizeb);
+    void store_nn_cache(const uint64_t hash_key,  unsigned short** const p_index,
                            int* const p_size, float** const p_outputs);
-    bool retrieve_nn_cache(const UBMP64 hash_key, unsigned short** const p_index,
+    bool retrieve_nn_cache(const uint64_t hash_key, unsigned short** const p_index,
                               int* const p_size, float** p_outputs);
 };
 
@@ -564,58 +564,58 @@ void TrtModel::predict() {
   Neural network caching
 */
 
-void NeuralNet::allocate_nn_cache(UBMP32 sizeb) {
-    hash_entry_sz = sizeof(UBMP64);
+void NeuralNet::allocate_nn_cache(uint32_t sizeb) {
+    hash_entry_sz = sizeof(uint64_t);
     for(int k = 0; k < output_layer_sizes.size(); k++) {
         hash_entry_sz += output_layer_sizes[k] * 
                 (sizeof(unsigned short) + sizeof(float));
     }
-    hash_entry_sz = sizeof(UBMP64) * ( (hash_entry_sz + sizeof(UBMP64) - 1) / sizeof(UBMP64));
+    hash_entry_sz = sizeof(uint64_t) * ( (hash_entry_sz + sizeof(uint64_t) - 1) / sizeof(uint64_t));
 
-    UBMP32 size = 1, size_max = sizeb / hash_entry_sz;
+    uint32_t size = 1, size_max = sizeb / hash_entry_sz;
     while(2 * size <= size_max) size *= 2;
     nn_cache_mask = size - 1;
-    hash_entry_sz /= sizeof(UBMP64);
-    aligned_reserve<UBMP64>( nn_cache, size * hash_entry_sz );
+    hash_entry_sz /= sizeof(uint64_t);
+    aligned_reserve<uint64_t>( nn_cache, size * hash_entry_sz );
 
-    printf("nn_cache %d X %d = %.1f MB\n",size,int(hash_entry_sz * sizeof(UBMP64)),
-        (size * hash_entry_sz * sizeof(UBMP64)) / double(1024 * 1024));
+    printf("nn_cache %d X %d = %.1f MB\n",size,int(hash_entry_sz * sizeof(uint64_t)),
+        (size * hash_entry_sz * sizeof(uint64_t)) / double(1024 * 1024));
     fflush(stdout);
 }
 
-void NeuralNet::store_nn_cache(const UBMP64 hash_key,  unsigned short** const p_index,
+void NeuralNet::store_nn_cache(const uint64_t hash_key,  unsigned short** const p_index,
                            int* const p_size, float** const p_outputs
     ) {
-    UBMP32 key = UBMP32(hash_key & nn_cache_mask);
-    UBMP64* const nn_hash = nn_cache + key * hash_entry_sz; 
+    uint32_t key = uint32_t(hash_key & nn_cache_mask);
+    uint64_t* const nn_hash = nn_cache + key * hash_entry_sz; 
     
     if(*nn_hash != hash_key) {
         *nn_hash = hash_key;
-        UBMP16* p = (UBMP16*) (nn_hash + 1);
+        uint16_t* p = (uint16_t*) (nn_hash + 1);
         for(int k = 0; k < output_layer_names.size(); k++) {
             memcpy(p, p_outputs[k], p_size[k] * sizeof(float));
             p += p_size[k] * 2;
             if(p_index[k]) {
-                memcpy(p, p_index[k], p_size[k] * sizeof(UBMP16));
+                memcpy(p, p_index[k], p_size[k] * sizeof(uint16_t));
                 p += p_size[k];
             }
         }
     }
 }
 
-bool NeuralNet::retrieve_nn_cache(const UBMP64 hash_key, unsigned short** const p_index,
+bool NeuralNet::retrieve_nn_cache(const uint64_t hash_key, unsigned short** const p_index,
                               int* const p_size, float** p_outputs
     ) {
-    UBMP32 key = UBMP32(hash_key & nn_cache_mask);
-    UBMP64* const nn_hash = nn_cache + key * hash_entry_sz;
+    uint32_t key = uint32_t(hash_key & nn_cache_mask);
+    uint64_t* const nn_hash = nn_cache + key * hash_entry_sz;
 
     if(*nn_hash == hash_key) {
-        UBMP16* p = (UBMP16*) (nn_hash + 1);
+        uint16_t* p = (uint16_t*) (nn_hash + 1);
         for(int k = 0; k < output_layer_names.size(); k++) {
             if(p_index[k]) {
                 float* const nn_outputs = (float*)p;
                 p += p_size[k] * 2;
-                UBMP16* const nn_index = (UBMP16*)(p);
+                uint16_t* const nn_index = (uint16_t*)(p);
                 p += p_size[k];
 
                 for(int i = 0; i < p_size[k]; i++) {
@@ -835,10 +835,10 @@ static int add_to_batch(Model* net, float** iplanes, float** p_outputs,
     t_sleep(delayms); \
 }
 
-DLLExport void  CDECL probe_neural_network(
+DLLExport void  _CDECL probe_neural_network(
     float** iplanes, float** p_outputs,
     int* p_size, unsigned short** p_index, 
-    UBMP64 hash_key, bool hard_probe, int nn_id
+    uint64_t hash_key, bool hard_probe, int nn_id
     ) {
 
     //retrieve from cache
@@ -931,6 +931,6 @@ RETRY:
 /*
    Set number of active workers
 */
-DLLExport void CDECL set_num_active_searchers(int n_searchers) {
+DLLExport void _CDECL set_num_active_searchers(int n_searchers) {
     l_set(n_active_searchers,n_searchers);
 }
