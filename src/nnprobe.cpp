@@ -112,6 +112,8 @@ using namespace tensorflow;
 class TfModel : public Model {
     Tensor** input_layers;
     Session* session;
+    std::vector<std::pair<std::string, Tensor> > inps;
+    std::vector<std::string> outs;
 public:
     TfModel(NeuralNet*, int, int);
     ~TfModel();
@@ -188,13 +190,7 @@ void TfModel::LoadGraph(int dev_id, int dev_type) {
 
     SessionOptions options;
     Status status = NewSession(options, &session);
-    session->Create(graph_def);    
-}
-
-void TfModel::predict() {
-    std::vector<Tensor> outputs;
-    std::vector<std::pair<std::string, Tensor> > inps;
-    std::vector<std::string> outs;
+    session->Create(graph_def);
 
     for(int n = 0; n < pnn->input_layer_names.size(); n++) {
         std::pair<std::string, Tensor> pr( 
@@ -203,7 +199,10 @@ void TfModel::predict() {
     }
     for(int n = 0; n < pnn->output_layer_names.size(); n++)
         outs.push_back(pnn->output_layer_names[n]);
+}
 
+void TfModel::predict() {
+    std::vector<Tensor> outputs;
     TF_CHECK_OK( session->Run(inps, outs, {}, &outputs) );
 
     for(int k = 0; k < pnn->output_layer_names.size(); k++) {
@@ -224,7 +223,6 @@ void TfModel::predict() {
             }
         }
     }
-
 }
 #endif
 

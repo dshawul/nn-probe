@@ -4,8 +4,8 @@ set -eux
 
 OS=ubuntu
 export TENSORFLOW_ROOT=${TENSORFLOW_ROOT:-~/tensorflow}
-export TensorRT_ROOT=${TensorRT_ROOT:-~/TensorRT-7.2.0.14-cuda110}
-export CUDA_ROOT=${CUDA_ROOT:-/usr/local/cuda-11.0}
+export TensorRT_ROOT=${TensorRT_ROOT:-~/TensorRT-7.2.1.6-cuda111}
+export CUDA_ROOT=${CUDA_ROOT:-/usr/local/cuda-11.1}
 export CUDNN_ROOT=${CUDNN_ROOT:-~/cudnn-804}
 export LD_LIBRARY_PATH=$CUDNN_ROOT/lib64:$CUDA_ROOT/lib64::$TensorRT_ROOT/lib
 
