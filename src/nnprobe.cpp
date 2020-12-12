@@ -30,6 +30,10 @@ static int n_searchers;
 static VOLATILE int n_active_searchers;
 static VOLATILE int chosen_device = 0;
 static int delayms = 0;
+static int batch_size_factor = 0;
+
+enum { FCFS, ROUNDROBIN };
+static int scheduling = FCFS;
 
 enum { FP32 = 0, FP16, FP8 };
 static const char* float_type_string[] = {"FLOAT", "HALF", "INT8"};
@@ -651,17 +655,29 @@ void determine_minibatch_sizes(int t_batch_size, int* bsize) {
         bsize[i] = prop.multiProcessorCount;
         total_mps += bsize[i];
     }
-    int tbsize = 0;
-    for (int i = 0; i < N_DEVICES; i++) {
-        bsize[i] = t_batch_size * bsize[i] / total_mps;
-        tbsize += bsize[i];
-    }
-    if(tbsize != t_batch_size) {
-        bsize[N_DEVICES - 1] += t_batch_size - tbsize;
-        printf("MiniBatch size not ideal: specified %d ideal %d\n"
-               "Please use %d for best performance\n",
-               t_batch_size, tbsize, tbsize);
-        fflush(stdout);
+    if(batch_size_factor) {
+        for (int i = 0; i < N_DEVICES; i++)
+            bsize[i] *= batch_size_factor;
+        int tbsize = total_mps * batch_size_factor;
+        if(t_batch_size % tbsize != 0) {
+            printf("Number of worker threads not ideal: specified %d ideal %d\n"
+               "Please use the latter for best performance\n",
+               t_batch_size, (t_batch_size / tbsize) * tbsize);
+            fflush(stdout);
+        }
+    } else {
+        int tbsize = 0;
+        for (int i = 0; i < N_DEVICES; i++) {
+            bsize[i] = t_batch_size * bsize[i] / total_mps;
+            tbsize += bsize[i];
+        }
+        if(tbsize != t_batch_size) {
+            bsize[N_DEVICES - 1] += t_batch_size - tbsize;
+            printf("MiniBatch size not ideal: specified %d ideal %d\n"
+               "Please use the latter for best performance\n",
+               t_batch_size, tbsize);
+            fflush(stdout);
+        }
     }
 #else
     for (int i = 0; i < N_DEVICES; i++) {
@@ -690,7 +706,8 @@ DLLExport void CDECL load_neural_network(
     char* input_names, char* output_names,
     char* input_shapes, char* output_sizes,
     int nn_cache_size, int dev_type, int n_devices,
-    int max_threads, int float_type, int delay, int nn_id
+    int max_threads, int float_type, int delay, int nn_id,
+    int batch_size_factor_, int scheduling_
     ) {
 
 #ifdef _WIN32
@@ -706,6 +723,8 @@ DLLExport void CDECL load_neural_network(
     n_searchers = max_threads;
     N_DEVICES = n_devices;
     n_active_searchers = n_searchers;
+    batch_size_factor = batch_size_factor_;
+    scheduling = scheduling_;
 
     NeuralNet* pnn = new NeuralNet();
 
@@ -856,6 +875,11 @@ RETRY:
 
             if(!net->n_batch_eval && !net->n_finished_threads) {
                 if(l_add(net->n_batch_i, 1) < net->BATCH_SIZE) {
+                    if(scheduling == ROUNDROBIN) {
+                        device_id++;
+                        if(device_id == N_DEVICES)
+                            device_id = 0;
+                    }
                     l_set(chosen_device, device_id);
                     break;
                 } else {
