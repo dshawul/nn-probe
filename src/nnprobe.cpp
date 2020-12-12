@@ -566,7 +566,7 @@ void TrtModel::predict() {
   Neural network caching
 */
 
-void NeuralNet::allocate_nn_cache(uint32_t sizeb) {
+void NeuralNet::allocate_nn_cache(uint32_t sizekb) {
     hash_entry_sz = sizeof(uint64_t);
     for(int k = 0; k < output_layer_sizes.size(); k++) {
         hash_entry_sz += output_layer_sizes[k] * 
@@ -574,6 +574,7 @@ void NeuralNet::allocate_nn_cache(uint32_t sizeb) {
     }
     hash_entry_sz = sizeof(uint64_t) * ( (hash_entry_sz + sizeof(uint64_t) - 1) / sizeof(uint64_t));
 
+    uint64_t sizeb = uint64_t(sizekb) * 1024;
     uint32_t size = 1, size_max = sizeb / hash_entry_sz;
     while(2 * size <= size_max) size *= 2;
     nn_cache_mask = size - 1;

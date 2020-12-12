@@ -46,7 +46,7 @@ DLLExport void _CDECL load_neural_network(
     char* input_shapes,           /** String containing shapes of input nodes */
     char* output_sizes,           /** String containing shapes of output nodes */
 
-    int nn_cache_size = 4194304,  /** neural network cache size in bytes */
+    int nn_cache_size = 4096,     /** neural network cache size in killo-bytes */
     int dev_type = _CPU,          /** The type of device (CPU or GPU */ 
     int n_devices = 1,            /** number of devices to use */
     int max_threads = 1,          /** maximum number of threads simultaneoulsy probing neural network.
