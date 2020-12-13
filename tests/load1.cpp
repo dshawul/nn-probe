@@ -17,7 +17,7 @@ int main(int argc, char** argv) {
   char output_sizes[] = "3 256";
 
   /* loading options */
-  int cache_size = 4194304;
+  int cache_size = 4096;
   int device_type = _CPU;
   int n_devices = 1;
   int max_threads = 1;
