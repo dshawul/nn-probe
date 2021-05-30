@@ -799,12 +799,28 @@ DLLExport void CDECL load_neural_network(
 #if 1
     /*warm up nn*/
     for(int dev_id = 0; dev_id < N_DEVICES; dev_id++) {
+
         int piece = 0, square = 0;
         Model* net = netModel[nn_id][dev_id];
         for(int i = 0;i < net->BATCH_SIZE;i++)
             add_to_batch(net, 0, 0, 0, 0);
         net->n_batch = 0;
+
+#if 0
+        /*time the backend*/
+        TIMER s, e;
+        get_perf(s);
+        for(int i = 0; i < 100; i++)
+            net->predict();
+        get_perf(e);
+        double ms = get_diff(s,e) / 1e8;
+
+        printf("DEV %d :  %.2f ms %.2f nps\n",
+            dev_id, ms, net->BATCH_SIZE * 1e3 / ms);
+        fflush(stdout);
+#else
         net->predict();
+#endif
     }
 #endif
 
