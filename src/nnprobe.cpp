@@ -281,11 +281,11 @@ public:
         }
     }
 
-    int getBatchSize() const override {
+    int getBatchSize() const noexcept override {
         return CAL_BATCH_SIZE;
     }
 
-    bool getBatch(void* bindings[], const char* names[], int nbBindings) override {
+    bool getBatch(void* bindings[], const char* names[], int nbBindings) noexcept override {
         if (counter >= NUM_CAL_BATCH)
             return false;
 
@@ -314,11 +314,11 @@ public:
         return true;
     }
 
-    const void* readCalibrationCache(size_t& length) override {
+    const void* readCalibrationCache(size_t& length) noexcept override {
         return nullptr;
     }
 
-    void writeCalibrationCache(const void* cache, size_t length) override {
+    void writeCalibrationCache(const void* cache, size_t length) noexcept override {
     }
 
 private:
@@ -336,7 +336,7 @@ private:
 const std::string Int8CacheCalibrator::calib_file_name = "calibrate.dat";
 
 class Logger : public ILogger {
-    void log(Severity severity, const char* msg) override {
+    void log(Severity severity, const char* msg) noexcept override {
         if (severity != Severity::kINFO &&
 	    severity != Severity::kVERBOSE &&
 	    severity != Severity::kWARNING)
@@ -399,7 +399,7 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
 
         for(int n = 0; n < pnn->input_layer_names.size(); n++)
             parser->registerInput(pnn->input_layer_names[n].c_str(), 
-                nvinfer1::DimsCHW(std::get<0>(pnn->input_layer_shapes[n]),
+                nvinfer1::Dims3(std::get<0>(pnn->input_layer_shapes[n]),
                                   std::get<1>(pnn->input_layer_shapes[n]),
                                   std::get<2>(pnn->input_layer_shapes[n])), 
                                   UffInputOrder::kNCHW);
@@ -431,7 +431,7 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
         }
         
         /*create network*/
-        INetworkDefinition* network = builder->createNetwork();
+        INetworkDefinition* network = builder->createNetworkV2(0U);
         nvinfer1::DataType loadMode;
         if(float_type == FP16)
             loadMode = nvinfer1::DataType::kHALF;
@@ -443,18 +443,19 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
         }
 
         /*create engine*/
+        IBuilderConfig* config = builder->createBuilderConfig();
         Int8CacheCalibrator calibrator(pnn, float_type);
 
+        config->setMaxWorkspaceSize((1 << 30));
         if (float_type == FP16) {
-            builder->setFp16Mode(true);
+            config->setFlag(BuilderFlag::kFP16);
         } else if (float_type == FP8) {
-            builder->setInt8Mode(true);
-            builder->setInt8Calibrator(&calibrator);
+            config->setFlag(BuilderFlag::kINT8);
+            config->setInt8Calibrator(&calibrator);
         }
         builder->setMaxBatchSize(BATCH_SIZE);
-        builder->setMaxWorkspaceSize((1 << 30));
 
-        engine = builder->buildCudaEngine(*network);
+        engine = builder->buildEngineWithConfig(*network,*config);
         if (!engine) {
             std::cout << "Unable to create engine" << std::endl;
             return;

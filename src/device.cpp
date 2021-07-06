@@ -46,7 +46,7 @@ void display_device_properties(int count, cudaDeviceProp* props) {
 
 using namespace nvinfer1;
 class Logger : public ILogger {
-    void log(Severity severity, const char* msg) override {
+    void log(Severity severity, const char* msg) noexcept override {
     }
 };
 
