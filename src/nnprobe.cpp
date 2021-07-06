@@ -374,8 +374,6 @@ TrtModel::TrtModel(NeuralNet* pnn_, int bsize, int float_type) : Model(pnn_, bsi
 }
 
 TrtModel::~TrtModel() {
-    context->destroy();
-    engine->destroy();
     cudaFreeHost(buffers_h[0]);
 }
 
@@ -462,15 +460,10 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
             return;
         }
 
-        network->destroy();
-        builder->destroy();
-        parser->destroy();
-
         IHostMemory *trtModelStream = engine->serialize();
         FILE* out_file = fopen(trtName.c_str(),"wb");
         fwrite((char*)(trtModelStream->data()), 1, trtModelStream->size(), out_file);
         fclose(out_file);
-        trtModelStream->destroy();
     } else {
         char* trtModelStream{nullptr};
         size_t size{0};
