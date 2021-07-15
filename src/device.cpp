@@ -86,10 +86,8 @@ int main(int argc, char** argv) {
             IBuilder* builder = createInferBuilder(logger);
             if(!builder->platformHasFastInt8()) {
                 printf("N\n");
-                builder->destroy();
                 return 0;
             }
-            builder->destroy();
         }
         printf("Y\n");
     } else if(!strcmp(argv[1],"--int8-each")) {
@@ -100,7 +98,6 @@ int main(int argc, char** argv) {
                 printf("Y\n");
             else
                 printf("N\n");
-            builder->destroy();
         }
     } else if(!strcmp(argv[1],"--fp16")) {
         for (int i = 0; i < count; i++) {
@@ -108,10 +105,8 @@ int main(int argc, char** argv) {
             IBuilder* builder = createInferBuilder(logger);
             if(!builder->platformHasFastFp16()) {
                 printf("N\n");
-                builder->destroy();
                 return 0;
             }
-            builder->destroy();
         }
         printf("Y\n");
     } else if(!strcmp(argv[1],"--fp16-each")) {
@@ -122,7 +117,6 @@ int main(int argc, char** argv) {
                 printf("Y\n");
             else
                 printf("N\n");
-            builder->destroy();
         }
     } else if(!strcmp(argv[1],"--help") || !strcmp(argv[1],"-h")) {
         printf("Usage: device [option]\n"
