@@ -27,8 +27,8 @@
 
 static int N_DEVICES;
 static int n_searchers;
-static VOLATILE int n_active_searchers;
-static VOLATILE int chosen_device = 0;
+static std::atomic_int n_active_searchers;
+static std::atomic_int chosen_device = {0};
 static int delayms = 0;
 static int batch_size_factor = 0;
 
@@ -68,10 +68,10 @@ public:
     float*** p_outputs;
     unsigned short*** p_index;
     int** p_size;
-    VOLATILE int n_batch;
-    VOLATILE int n_batch_i;
-    VOLATILE int n_batch_eval;
-    VOLATILE int n_finished_threads;
+    std::atomic_int n_batch;
+    std::atomic_int n_batch_i;
+    std::atomic_int n_batch_eval;
+    std::atomic_int n_finished_threads;
     int float_type;
     int BATCH_SIZE;
     int id;

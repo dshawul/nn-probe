@@ -6,26 +6,26 @@ Platform specific defines for Windows
 For others, they are set in Makefile
 */
 #ifdef _MSC_VER
-#define ARC_64BIT
-#define HAS_POPCNT
-#define HAS_PREFETCH
-#define PARALLEL
-#define USE_SPINLOCK
+#   define ARC_64BIT
+#   define HAS_POPCNT
+#   define HAS_PREFETCH
+#   define USE_SPINLOCK
 #endif
 #ifdef HAS_BSF
-#define HAS_BSF
+#   define HAS_BSF
 #endif
 
 /*
 int types
 */
-#    include <stdint.h>
+#include <stdint.h>
 
 /*
 Os stuff
 */
 #ifdef _WIN32
 #    include <windows.h>
+#    include <process.h>
 #    undef CDECL
 #    define CDECL __cdecl
 #    define GETPID()  _getpid()
@@ -33,6 +33,7 @@ Os stuff
 #else
 #    include <unistd.h>
 #    include <sys/syscall.h>
+#    include <sys/mman.h>
 #    define CDECL
 #    define GETPID()  getpid()
 #    define GETTID()  syscall(SYS_gettid)
@@ -107,10 +108,13 @@ Byte swap
 */
 #if defined(__INTEL_COMPILER)
 #   define bswap32(x)  _bswap(x)
+#   define bswap64(x)  _bswap64(x)
 #elif defined(_MSC_VER)
 #   define bswap32(x)  _byteswap_ulong(x)
+#   define bswap64(x)  _byteswap_uint64(x)
 #elif defined(__GNUC__)
 #   define bswap32(x)  __builtin_bswap32(x)
+#   define bswap64(x)  __builtin_bswap64(x)
 #endif
 
 /*
@@ -130,14 +134,18 @@ void aligned_free(T*& mem) {
     mem = 0;
 }
 
-template<typename T>
+template<typename T, int ALIGNMENT = CACHE_LINE_SIZE, bool large_pages = false>
 void aligned_reserve(T*& mem,const size_t& size) {
 #ifdef __ANDROID__
-    mem = (T*) memalign(CACHE_LINE_SIZE,size * sizeof(T));
+    mem = (T*) memalign(ALIGNMENT,size * sizeof(T));
 #elif defined(_WIN32)
-    mem = (T*)_aligned_malloc(size * sizeof(T),CACHE_LINE_SIZE);
+    mem = (T*)_aligned_malloc(size * sizeof(T),ALIGNMENT);
 #else
-    posix_memalign((void**)&mem,CACHE_LINE_SIZE,size * sizeof(T));
+    posix_memalign((void**)&mem,ALIGNMENT,size * sizeof(T));
+#if defined(MADV_HUGEPAGE)
+    if(large_pages)
+        madvise(mem,size * sizeof(T),MADV_HUGEPAGE);
+#endif
 #endif
 }
 
@@ -150,109 +158,67 @@ Prefetch
 #else
 #   define PREFETCH_T0(addr)
 #endif
+
 /*
 * Threads
 */
+#include<thread>
+#include<chrono>
+#include<atomic>
+#include<mutex>
+#include<condition_variable>
+
+#define t_create(f,p)    std::thread(f,p)
+#define t_join(h)        h.join()
+#define t_yield()        std::this_thread::yield()
+
 #if defined _WIN32
-#   include <process.h>
-#   define pthread_t HANDLE
-#   define t_create(h,f,p)  h=(HANDLE)_beginthread(f,0,(void*)p)
-#   define t_join(h)      WaitForSingleObject(h,INFINITE)
-#   define t_sleep(x)     Sleep(x)
-#   define t_yield()      SwitchToThread()
-#   define t_pause()      YieldProcessor()
+#   define t_pause()  YieldProcessor()
+#   define t_sleep(x) Sleep(x)
 #else
-#   include <pthread.h>
-#   define t_create(h,f,p)  pthread_create(&h,0,(void*(*)(void*))&f,(void*)p)
-#   define t_join(h)      pthread_join((pthread_t)h,0)
-#   define t_sleep(x)     usleep((x) * 1000)
-#   define t_yield()      sched_yield()
-#   define t_pause()      asm volatile("pause\n": : :"memory")
-#endif
+#   define t_sleep(x) usleep((x) * 1000)
 #if defined __ANDROID__
-#   undef t_pause
 #   define t_pause()
+#else
+#   define t_pause()  asm volatile("pause\n": : :"memory")
 #endif
+#endif
+
 /*
 *locks
 */
-#if defined PARALLEL
-#    define VOLATILE volatile
-#    if defined _MSC_VER
-#       define l_set(x,v) InterlockedExchange((unsigned*)&(x),v)
-#       define l_add(x,v) InterlockedExchangeAdd((unsigned*)&(x),v)
-#       define l_set16(x,v) InterlockedExchange16((short*)&(x),v)
-#       define l_add16(x,v) InterlockedExchangeAdd16((short*)&(x),v)
-#       define l_and16(x,v) InterlockedAnd16((short*)&(x),v)
-#       define l_or16(x,v) InterlockedOr16((short*)&(x),v)
-#       define l_set8(x,v) InterlockedExchange8((char*)&(x),v)
-#       define l_add8(x,v) InterlockedExchangeAdd8((char*)&(x),v)
-#       define l_and8(x,v) InterlockedAnd8((char*)&(x),v)
-#       define l_or8(x,v) InterlockedOr8((char*)&(x),v)
-#    else
-#       define l_set(x,v) __sync_lock_test_and_set(&(x),v)
-#       define l_add(x,v) __sync_fetch_and_add(&(x),v)
-#       define l_set16(x,v) __sync_lock_test_and_set((short*)&(x),v)
-#       define l_add16(x,v) __sync_fetch_and_add((short*)&(x),v)
-#       define l_and16(x,v) __sync_fetch_and_and((short*)&(x),v)
-#       define l_or16(x,v) __sync_fetch_and_or((short*)&(x),v)
-#       define l_set8(x,v) __sync_lock_test_and_set((char*)&(x),v)
-#       define l_add8(x,v) __sync_fetch_and_add((char*)&(x),v)
-#       define l_and8(x,v) __sync_fetch_and_and((char*)&(x),v)
-#       define l_or8(x,v) __sync_fetch_and_or((char*)&(x),v)
-#    endif
-#    if defined OMP
-#       include <omp.h>
-#       define LOCK          omp_lock_t
-#       define l_create(x)   omp_init_lock(&x)
-#       define l_try_lock(x) omp_set_lock(&x)
-#       define l_lock(x)     omp_test_lock(&x)
-#       define l_unlock(x)   omp_unset_lock(&x)
-inline void l_barrier() { 
-#       pragma omp barrier 
-}
-#    else
-#       ifdef USE_SPINLOCK
-#           define LOCK VOLATILE int
-#           define l_create(x)   ((x) = 0)
-#           define l_try_lock(x) (l_set(x,1) != 0)
-#           define l_lock(x)     while(l_try_lock(x)) {while((x) != 0) t_pause();}
-#           define l_unlock(x)   ((x) = 0)
-#       else
-#           if defined _WIN32
-#               define LOCK CRITICAL_SECTION
-#               define l_create(x)   InitializeCriticalSection(&x)
-#               define l_try_lock(x) TryEnterCriticalSection(&x)
-#               define l_lock(x)     EnterCriticalSection(&x)
-#               define l_unlock(x)   LeaveCriticalSection(&x)  
-#           else
-#               define LOCK pthread_mutex_t
-#               define l_create(x)   pthread_mutex_init(&(x),0)
-#               define l_try_lock(x) pthread_mutex_trylock(&(x))
-#               define l_lock(x)     pthread_mutex_lock(&(x))
-#               define l_unlock(x)   pthread_mutex_unlock(&(x))
-#           endif
-#       endif
-#    endif
+//atomic ops
+#define l_set(x,v) x.exchange(v)
+#define l_add(x,v) x.fetch_add(v)
+#define l_and(x,v) x.fetch_and(v)
+#define l_or(x,v) x.fetch_or(v)
+#define l_barrier()
+//conditional variable
+#define COND std::condition_variable
+#define c_create(x)
+#define c_signal(x)   x.notify_one()
+#define c_wait(x,l)   x.wait(l)
+//mutex
+#define MUTEX std::mutex
+#define m_create(x)
+#define m_try_lock(x) x.trylock()
+#define m_lock(x)     x.lock()
+#define m_unlock(x)   x.unlock()
+//spinlock
+#ifdef USE_SPINLOCK
+#   define LOCK std::atomic_int
+#   define l_create(x)   ((x) = 0)
+#   define l_try_lock(x) (l_set(x,1) != 0)
+#   define l_lock(x)     while(l_try_lock(x)) {while((x) != 0) t_pause();}
+#   define l_unlock(x)   ((x) = 0)
 #else
-#    define VOLATILE
-#    define LOCK int
-#    define l_create(x)
-#    define l_lock(x)
-#    define l_try_lock(x) (1)
-#    define l_unlock(x)
-#    define l_barrier()
-#    define l_set(x,v) ((x) = v)
-#    define l_add(x,v) ((x) += v)
-#    define l_set16(x,v) ((x) = v)
-#    define l_add16(x,v) ((x) += v)
-#    define l_and16(x,v) ((x) &= v)
-#    define l_or16(x,v) ((x) |= v)
-#    define l_set8(x,v) ((x) = v)
-#    define l_add8(x,v) ((x) += v)
-#    define l_and8(x,v) ((x) &= v)
-#    define l_or8(x,v) ((x) |= v)
+#   define LOCK MUTEX
+#   define l_create(x)   m_create(x)
+#   define l_try_lock(x) m_try_lock(x)
+#   define l_lock(x)     m_lock(x)
+#   define l_unlock(x)   m_unlock(x)
 #endif
+
 /*
 * Performance counters
 */
@@ -272,14 +238,10 @@ inline double get_diff(TIMER s,TIMER e) {
     return (e.tv_sec - s.tv_sec) * 1e9 + (e.tv_nsec - s.tv_nsec);
 }
 #endif
+
 /*
-*optional compilation
+*optional code compilation
 */
-#ifdef PARALLEL
-#    define SMP_CODE(x) x
-#else
-#    define SMP_CODE(x)
-#endif
 #ifdef CLUSTER
 #    define CLUSTER_CODE(x) x
 #else
@@ -291,7 +253,4 @@ inline double get_diff(TIMER s,TIMER e) {
 #    define DEBUG_CODE(x)
 #endif
 
-/*
-end
-*/
 #endif
