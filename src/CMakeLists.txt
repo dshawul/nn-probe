@@ -121,6 +121,8 @@ if(TRT)
     target_link_libraries(nnprobe PUBLIC "${NVINFER}" )
     find_library(NVPARSERS nvparsers HINTS "${TRT_DIR}/lib")
     target_link_libraries(nnprobe PUBLIC "${NVPARSERS}" )
+    find_library(NVONNXPARSER nvonnxparser HINTS "${TRT_DIR}/lib")
+    target_link_libraries(nnprobe PUBLIC "${NVONNXPARSER}" )
 endif()
 
 #

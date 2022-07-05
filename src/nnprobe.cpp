@@ -17,6 +17,7 @@
 #include "include/cuda_runtime_api.h"
 #include "include/NvInfer.h"
 #include "include/NvUffParser.h"
+#include "include/NvOnnxParser.h"
 #endif
 
 #define DLL_EXPORT
@@ -235,7 +236,6 @@ void TfModel::predict() {
 */
 #ifdef TRT
 
-using namespace nvuffparser;
 using namespace nvinfer1;
 
 class Int8CacheCalibrator : public IInt8EntropyCalibrator2 {
@@ -338,9 +338,9 @@ const std::string Int8CacheCalibrator::calib_file_name = "calibrate.dat";
 class Logger : public ILogger {
     void log(Severity severity, const char* msg) noexcept override {
         if (severity != Severity::kINFO &&
-	    severity != Severity::kVERBOSE &&
-	    severity != Severity::kWARNING)
-            std::cout << msg << std::endl;
+            severity != Severity::kVERBOSE &&
+            severity != Severity::kWARNING)
+                std::cout << msg << std::endl;
     }
 };
 
@@ -391,21 +391,11 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
                           ".trt";
     std::ifstream ifs(trtName.c_str(), std::ios::in | std::ios::binary);
 
+    /*uff or onnx*/
+    bool is_uff = (strstr(pnn->path, ".uff") != NULL);
+
     /*generate or read trt file*/
     if (!ifs.is_open()) {
-
-        IUffParser* parser;
-        parser = createUffParser();
-
-        for(int n = 0; n < pnn->input_layer_names.size(); n++)
-            parser->registerInput(pnn->input_layer_names[n].c_str(), 
-                nvinfer1::Dims3(std::get<0>(pnn->input_layer_shapes[n]),
-                                  std::get<1>(pnn->input_layer_shapes[n]),
-                                  std::get<2>(pnn->input_layer_shapes[n])), 
-                                  UffInputOrder::kNCHW);
-
-        for(int n = 0; n < pnn->output_layer_names.size(); n++)
-            parser->registerOutput(pnn->output_layer_names[n].c_str());
 
         /*if requested precision is not supported, fallback to next available*/
         IBuilder* builder = createInferBuilder(logger);
@@ -431,21 +421,67 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
         }
         
         /*create network*/
-        INetworkDefinition* network = builder->createNetworkV2(0U);
-        nvinfer1::DataType loadMode;
-        if(float_type == FP16)
-            loadMode = nvinfer1::DataType::kHALF;
-        else
-            loadMode = nvinfer1::DataType::kFLOAT;
-        if(!parser->parse(pnn->path, *network, loadMode)) {
-            std::cout << "Fail to parse network " << pnn->path << std::endl;
-            return;
+        const auto explicitBatch = is_uff ? 0U : 
+            (1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH));
+        INetworkDefinition* network = builder->createNetworkV2(explicitBatch);
+
+        /*read network uff/onnx*/
+        IBuilderConfig* config = builder->createBuilderConfig();
+        IOptimizationProfile* profile = builder->createOptimizationProfile();
+
+        if(is_uff) {
+            nvuffparser::IUffParser* parser = nvuffparser::createUffParser();
+
+            for(int n = 0; n < pnn->input_layer_names.size(); n++) {
+                nvinfer1::Dims3 dim(std::get<0>(pnn->input_layer_shapes[n]),
+                                      std::get<1>(pnn->input_layer_shapes[n]),
+                                      std::get<2>(pnn->input_layer_shapes[n]));
+                parser->registerInput(
+                    pnn->input_layer_names[n].c_str(),
+                    dim,
+                    nvuffparser::UffInputOrder::kNCHW);
+            }
+
+            for(int n = 0; n < pnn->output_layer_names.size(); n++)
+                parser->registerOutput(pnn->output_layer_names[n].c_str());
+
+            nvinfer1::DataType loadMode;
+            if(float_type == FP16)
+                loadMode = nvinfer1::DataType::kHALF;
+            else
+                loadMode = nvinfer1::DataType::kFLOAT;
+
+            if(!parser->parse(pnn->path, *network, loadMode)) {
+                std::cout << "Fail to parse network " << pnn->path << std::endl;
+                return;
+            }
+        } else {
+            nvonnxparser::IParser* parser = nvonnxparser::createParser(*network, logger);
+
+            for(int n = 0; n < pnn->input_layer_names.size(); n++) {
+                nvinfer1::Dims4 mydim(
+                    BATCH_SIZE,
+                    std::get<0>(pnn->input_layer_shapes[n]),
+                    std::get<1>(pnn->input_layer_shapes[n]),
+                    std::get<2>(pnn->input_layer_shapes[n]));
+                auto name = pnn->input_layer_names[n].c_str();
+
+                profile->setDimensions(name, OptProfileSelector::kMIN, mydim);
+                profile->setDimensions(name, OptProfileSelector::kOPT, mydim);
+                profile->setDimensions(name, OptProfileSelector::kMAX, mydim);
+            }
+
+            if(!parser->parseFromFile(pnn->path,
+                static_cast<int32_t>(ILogger::Severity::kWARNING))) {
+                std::cout << "Fail to parse network " << pnn->path << std::endl;
+                return;
+            }
+
+            config->addOptimizationProfile(profile);
         }
 
         /*create engine*/
-        IBuilderConfig* config = builder->createBuilderConfig();
         Int8CacheCalibrator calibrator(pnn, float_type);
-
         config->setMaxWorkspaceSize((1 << 30));
         if (float_type == FP16) {
             config->setFlag(BuilderFlag::kFP16);
@@ -485,12 +521,13 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
     numBindings = engine->getNbBindings();
     
     /*Pinned memory*/
+    int start = is_uff ? 0 : 1;
     size_t TOTAL = 0;
     for(int i = 0; i < numBindings; i++) {
 
         Dims d = engine->getBindingDimensions(i);
         size_t size = 1;
-        for(size_t j = 0; j < d.nbDims; j++) 
+        for(size_t j = start; j < d.nbDims; j++)
             size*= d.d[j];
         TOTAL += size;
         buffer_sizes.push_back(size);
@@ -498,7 +535,7 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
 #if 1
         if(dev_id == N_DEVICES -1) {
             printf("%d. %s %d =",i,engine->getBindingName(i),(int)size);
-            for(size_t j = 0; j < d.nbDims; j++) 
+            for(size_t j = start; j < d.nbDims; j++)
                 printf(" %d",d.d[j]);
             printf("\n");
             fflush(stdout);
@@ -770,7 +807,7 @@ DLLExport void CDECL load_neural_network(
     if(strstr(path, ".pb") != NULL) {
         for(int i = 0; i < N_DEVICES; i++)
             netModel[nn_id][i] = new TfModel(pnn, minibatch[i], float_type);
-    } else if(strstr(path, ".uff") != NULL) {
+    } else if(strstr(path, ".uff") != NULL || strstr(path, ".onnx") != NULL) {
         for(int i = 0; i < N_DEVICES; i++)
             netModel[nn_id][i] = new TrtModel(pnn, minibatch[i], float_type);
     }
@@ -929,10 +966,10 @@ RETRY:
                && net->n_batch >= net->BATCH_SIZE - (n_searchers - n_active_searchers)
                ) {
 #if 0
-                    printf("\n[0] # batchsize %d / %d  = active workers %d of %d\n",
-                        net->n_batch, net->BATCH_SIZE,
-                        n_active_searchers, n_searchers);
-                    fflush(stdout);
+                printf("\n[part] # batchsize %d / %d  = active workers %d of %d\n",
+                    (int)net->n_batch, net->BATCH_SIZE,
+                    (int)n_active_searchers, (int)n_searchers);
+                fflush(stdout);
 #endif
                 net->n_batch_eval = n_thread_batch;
                 net->predict();
@@ -942,6 +979,12 @@ RETRY:
         } while(net->n_finished_threads == 0);
 
     } else {
+#if 0
+        printf("\n[full] # batchsize %d / %d  = active workers %d of %d\n",
+            (int)net->n_batch, net->BATCH_SIZE,
+            (int)n_active_searchers, (int)n_searchers);
+        fflush(stdout);
+#endif
         net->n_batch_eval = n_thread_batch;
         net->predict();
     }

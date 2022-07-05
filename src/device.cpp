@@ -3,7 +3,7 @@
 #include "include/cuda_runtime_api.h"
 #include "include/NvInfer.h"
 
-void display_device_properties(int count, cudaDeviceProp* props) {
+static void display_device_properties(int count, cudaDeviceProp* props) {
     for (int i=0; i< count; i++) {
         cudaDeviceProp& prop = props[i];
         printf("====================== GPU %d ==========================\n", i);
@@ -45,7 +45,7 @@ void display_device_properties(int count, cudaDeviceProp* props) {
 }
 
 using namespace nvinfer1;
-class Logger : public ILogger {
+class dLogger : public ILogger {
     void log(Severity severity, const char* msg) noexcept override {
     }
 };
@@ -57,7 +57,7 @@ int main(int argc, char** argv) {
     for (int i = 0; i < count; i++)
         cudaGetDeviceProperties( &props[i], i );
 
-    Logger logger;
+    dLogger logger;
     
     if(argc == 1)
         display_device_properties(count, props);
