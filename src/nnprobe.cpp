@@ -14,10 +14,10 @@
 #include <iterator>
 #include <tuple>
 #include <cstring>
-#include "include/cuda_runtime_api.h"
-#include "include/NvInfer.h"
-#include "include/NvUffParser.h"
-#include "include/NvOnnxParser.h"
+#include "cuda_runtime_api.h"
+#include "NvInfer.h"
+#include "NvUffParser.h"
+#include "NvOnnxParser.h"
 #endif
 
 #define DLL_EXPORT

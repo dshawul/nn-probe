@@ -105,13 +105,13 @@ if(TRT)
 
     target_include_directories(
         nnprobe PUBLIC
-        "${TRT_DIR}"
-        "${CUDA_DIR}"
+        "${TRT_DIR}/include"
+        "${CUDA_DIR}/include"
     )
     target_include_directories(
         device PUBLIC
-        "${TRT_DIR}"
-        "${CUDA_DIR}"
+        "${TRT_DIR}/include"
+        "${CUDA_DIR}/include"
     )
     find_library(CUDART cudart HINTS "${CUDA_DIR}/lib64")
     target_link_libraries(device PUBLIC "${CUDART}" )

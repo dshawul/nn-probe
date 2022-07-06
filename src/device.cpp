@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <string.h>
-#include "include/cuda_runtime_api.h"
-#include "include/NvInfer.h"
+#include "cuda_runtime_api.h"
+#include "NvInfer.h"
 
 static void display_device_properties(int count, cudaDeviceProp* props) {
     for (int i=0; i< count; i++) {
