@@ -16,7 +16,6 @@
 #include <cstring>
 #include "cuda_runtime_api.h"
 #include "NvInfer.h"
-#include "NvUffParser.h"
 #include "NvOnnxParser.h"
 #endif
 
@@ -391,9 +390,6 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
                           ".trt";
     std::ifstream ifs(trtName.c_str(), std::ios::in | std::ios::binary);
 
-    /*uff or onnx*/
-    bool is_uff = (strstr(pnn->path, ".uff") != NULL);
-
     /*generate or read trt file*/
     if (!ifs.is_open()) {
 
@@ -421,41 +417,14 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
         }
         
         /*create network*/
-        const auto explicitBatch = is_uff ? 0U : 
+        const auto explicitBatch =
             (1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH));
         INetworkDefinition* network = builder->createNetworkV2(explicitBatch);
 
         /*read network uff/onnx*/
         IBuilderConfig* config = builder->createBuilderConfig();
         IOptimizationProfile* profile = builder->createOptimizationProfile();
-
-        if(is_uff) {
-            nvuffparser::IUffParser* parser = nvuffparser::createUffParser();
-
-            for(int n = 0; n < pnn->input_layer_names.size(); n++) {
-                nvinfer1::Dims3 dim(std::get<0>(pnn->input_layer_shapes[n]),
-                                      std::get<1>(pnn->input_layer_shapes[n]),
-                                      std::get<2>(pnn->input_layer_shapes[n]));
-                parser->registerInput(
-                    pnn->input_layer_names[n].c_str(),
-                    dim,
-                    nvuffparser::UffInputOrder::kNCHW);
-            }
-
-            for(int n = 0; n < pnn->output_layer_names.size(); n++)
-                parser->registerOutput(pnn->output_layer_names[n].c_str());
-
-            nvinfer1::DataType loadMode;
-            if(float_type == FP16)
-                loadMode = nvinfer1::DataType::kHALF;
-            else
-                loadMode = nvinfer1::DataType::kFLOAT;
-
-            if(!parser->parse(pnn->path, *network, loadMode)) {
-                std::cout << "Fail to parse network " << pnn->path << std::endl;
-                return;
-            }
-        } else {
+        {
             nvonnxparser::IParser* parser = nvonnxparser::createParser(*network, logger);
 
             for(int n = 0; n < pnn->input_layer_names.size(); n++) {
@@ -482,22 +451,23 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
 
         /*create engine*/
         Int8CacheCalibrator calibrator(pnn, float_type);
-        config->setMaxWorkspaceSize((1 << 30));
+        config->setMemoryPoolLimit(MemoryPoolType::kWORKSPACE, 1 << 30);
+
         if (float_type == FP16) {
             config->setFlag(BuilderFlag::kFP16);
         } else if (float_type == FP8) {
             config->setFlag(BuilderFlag::kINT8);
             config->setInt8Calibrator(&calibrator);
         }
-        builder->setMaxBatchSize(BATCH_SIZE);
 
-        engine = builder->buildEngineWithConfig(*network,*config);
-        if (!engine) {
-            std::cout << "Unable to create engine" << std::endl;
+        IHostMemory* trtModelStream = builder->buildSerializedNetwork(*network,*config);
+        if (!trtModelStream) {
+            std::cout << "Unable to create network" << std::endl;
             return;
         }
+        IRuntime* infer = createInferRuntime(logger);
+        engine = infer->deserializeCudaEngine(trtModelStream->data(), trtModelStream->size());
 
-        IHostMemory *trtModelStream = engine->serialize();
         FILE* out_file = fopen(trtName.c_str(),"wb");
         fwrite((char*)(trtModelStream->data()), 1, trtModelStream->size(), out_file);
         fclose(out_file);
@@ -513,19 +483,25 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
         ifs.close();
 
         IRuntime* infer = createInferRuntime(logger);
-        engine = infer->deserializeCudaEngine(trtModelStream, size, nullptr);
+        engine = infer->deserializeCudaEngine(trtModelStream, size);
         if (trtModelStream) delete[] trtModelStream;
     }
 
     context = engine->createExecutionContext();
-    numBindings = engine->getNbBindings();
+    numBindings = engine->getNbIOTensors();
     
+    std::vector<const char*> tensorNames;
+    for (int i = 0; i < numBindings; i++) {
+        tensorNames.push_back(engine->getIOTensorName(i));
+    }
+
     /*Pinned memory*/
-    int start = is_uff ? 0 : 1;
+    int start = 1;
     size_t TOTAL = 0;
     for(int i = 0; i < numBindings; i++) {
+        const char* tensorName = tensorNames[i];
 
-        Dims d = engine->getBindingDimensions(i);
+        Dims d = engine->getTensorShape(tensorName);
         size_t size = 1;
         for(size_t j = start; j < d.nbDims; j++)
             size*= d.d[j];
@@ -534,7 +510,7 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
 
 #if 1
         if(dev_id == N_DEVICES -1) {
-            printf("%d. %s %d =",i,engine->getBindingName(i),(int)size);
+            printf("%d. %s %d =",i,tensorName,(int)size);
             for(size_t j = start; j < d.nbDims; j++)
                 printf(" %d",d.d[j]);
             printf("\n");
@@ -558,17 +534,25 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
     }
 
     for(int n = 0; n < pnn->input_layer_names.size(); n++)
-        inp_index.push_back( 
-            engine->getBindingIndex(pnn->input_layer_names[n].c_str()) );
+        for (int i = 0; i < tensorNames.size(); i++) {
+            if (strcmp(pnn->input_layer_names[n].c_str(), tensorNames[i]) == 0) {
+                inp_index.push_back(i);
+                break;
+            }
+        }
     for(int n = 0; n < pnn->output_layer_names.size(); n++)
-        out_index.push_back( 
-            engine->getBindingIndex(pnn->output_layer_names[n].c_str()) );
+        for (int i = 0; i < tensorNames.size(); i++) {
+            if (strcmp(pnn->output_layer_names[n].c_str(), tensorNames[i]) == 0) {
+                out_index.push_back(i);
+                break;
+            }
+        }
 }
 void TrtModel::predict() {
 
     cudaSetDevice(Model::id);
 
-    context->execute(BATCH_SIZE, buffers.data());
+    context->executeV2(buffers.data());
 
     for(int k = 0; k < pnn->output_layer_names.size(); k++) {
         int NN_MAX = buffer_sizes[out_index[k]];
