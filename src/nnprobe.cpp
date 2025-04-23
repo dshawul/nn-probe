@@ -25,6 +25,8 @@
 
 #include "my_types.h"
 
+//#define USE_ZERO_COPY
+
 static int N_DEVICES;
 static int n_searchers;
 static std::atomic_int n_active_searchers;
@@ -372,6 +374,7 @@ class TrtModel : public Model {
     std::vector<int> buffer_sizes;
     std::vector<int> inp_index;
     std::vector<int> out_index;
+    size_t batch_size_bytes;
 public:
     TrtModel(NeuralNet*, int, int);
     ~TrtModel();
@@ -392,6 +395,9 @@ TrtModel::TrtModel(NeuralNet* pnn_, int bsize, int float_type) : Model(pnn_, bsi
 }
 
 TrtModel::~TrtModel() {
+#ifndef USE_ZERO_COPY
+    cudaFree(buffers[0]);
+#endif
     cudaFreeHost(buffers_h[0]);
 }
 
@@ -516,7 +522,7 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
 
     /*Pinned memory*/
     int start = 1;
-    size_t TOTAL = 0;
+    batch_size_bytes = 0;
     for(int i = 0; i < numBindings; i++) {
         const char* tensorName = tensorNames[i];
 
@@ -524,7 +530,7 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
         size_t size = 1;
         for(size_t j = start; j < d.nbDims; j++)
             size*= d.d[j];
-        TOTAL += size;
+        batch_size_bytes += size;
         buffer_sizes.push_back(size);
 
 #if 1
@@ -537,12 +543,21 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
         }
 #endif
     }
+    batch_size_bytes *= (BATCH_SIZE * sizeof(float));
 
     float* pDevice, *pHost;
+#ifdef USE_ZERO_COPY
     cudaHostAlloc((void**)&pHost, 
-        BATCH_SIZE * TOTAL * sizeof(float), 
+        batch_size_bytes, 
         cudaHostAllocMapped);
     cudaHostGetDevicePointer((void**)&pDevice,(void*)pHost,0);
+#else
+    cudaHostAlloc((void**)&pHost, 
+        batch_size_bytes, 
+        cudaHostAllocDefault);
+    cudaMalloc((void**)&pDevice,
+        batch_size_bytes);
+#endif
 
     for(int i = 0; i < numBindings; i++) {
         size_t size = buffer_sizes[i];
@@ -571,7 +586,13 @@ void TrtModel::predict() {
 
     cudaSetDevice(Model::id);
 
+#ifndef USE_ZERO_COPY
+    cudaMemcpy(buffers[0], buffers_h[0], batch_size_bytes, cudaMemcpyHostToDevice);
+#endif
     context->executeV2(buffers.data());
+#ifndef USE_ZERO_COPY
+    cudaMemcpy(buffers_h[0], buffers[0], batch_size_bytes, cudaMemcpyDeviceToHost);
+#endif
 
     for(int k = 0; k < pnn->output_layer_names.size(); k++) {
         int NN_MAX = buffer_sizes[out_index[k]];
