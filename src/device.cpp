@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include <string.h>
 #include "cuda_runtime_api.h"
-#include "NvInfer.h"
 
 static void display_device_properties(int count, cudaDeviceProp* props) {
     for (int i=0; i< count; i++) {
@@ -44,11 +43,21 @@ static void display_device_properties(int count, cudaDeviceProp* props) {
     printf("=======================================================\n");
 }
 
-using namespace nvinfer1;
-class dLogger : public ILogger {
-    void log(Severity severity, const char* msg) noexcept override {
-    }
-};
+static bool hasFastFp16(int device = 0)
+{
+    int major = 0, minor = 0;
+    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device);
+    cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device);
+    return (major >= 7);
+}
+
+static bool hasFastInt8(int device = 0)
+{
+    int major = 0, minor = 0;
+    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device);
+    cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device);
+    return (major > 7 || (major == 7 && minor >= 5));
+}
 
 int main(int argc, char** argv) {
     int count;
@@ -57,8 +66,6 @@ int main(int argc, char** argv) {
     for (int i = 0; i < count; i++)
         cudaGetDeviceProperties( &props[i], i );
 
-    dLogger logger;
-    
     if(argc == 1)
         display_device_properties(count, props);
     else if(!strcmp(argv[1],"-n") || !strcmp(argv[1],"--number"))
@@ -82,9 +89,7 @@ int main(int argc, char** argv) {
     }
     else if(!strcmp(argv[1],"--int8")) {
         for (int i = 0; i < count; i++) {
-            cudaSetDevice(i);
-            IBuilder* builder = createInferBuilder(logger);
-            if(!builder->platformHasFastInt8()) {
+            if(!hasFastInt8(i)) {
                 printf("N\n");
                 return 0;
             }
@@ -92,18 +97,14 @@ int main(int argc, char** argv) {
         printf("Y\n");
     } else if(!strcmp(argv[1],"--int8-each")) {
         for (int i = 0; i < count; i++) {
-            cudaSetDevice(i);
-            IBuilder* builder = createInferBuilder(logger);
-            if(builder->platformHasFastInt8())
+            if(hasFastInt8(i))
                 printf("Y\n");
             else
                 printf("N\n");
         }
     } else if(!strcmp(argv[1],"--fp16")) {
         for (int i = 0; i < count; i++) {
-            cudaSetDevice(i);
-            IBuilder* builder = createInferBuilder(logger);
-            if(!builder->platformHasFastFp16()) {
+            if(!hasFastFp16(i)) {
                 printf("N\n");
                 return 0;
             }
@@ -111,9 +112,7 @@ int main(int argc, char** argv) {
         printf("Y\n");
     } else if(!strcmp(argv[1],"--fp16-each")) {
         for (int i = 0; i < count; i++) {
-            cudaSetDevice(i);
-            IBuilder* builder = createInferBuilder(logger);
-            if(builder->platformHasFastFp16())
+            if(hasFastFp16(i))
                 printf("Y\n");
             else
                 printf("N\n");

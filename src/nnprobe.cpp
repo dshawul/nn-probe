@@ -39,6 +39,25 @@ enum { FP32 = 0, FP16, FP8 };
 static const char* float_type_string[] = {"FLOAT", "HALF", "INT8"};
 
 /*
+Check fp16 and int8 support
+*/
+static bool hasFastFp16(int device = 0)
+{
+    int major = 0, minor = 0;
+    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device);
+    cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device);
+    return (major >= 7);
+}
+
+static bool hasFastInt8(int device = 0)
+{
+    int major = 0, minor = 0;
+    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device);
+    cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device);
+    return (major > 7 || (major == 7 && minor >= 5));
+}
+
+/*
 Neural network properties
 */
 struct NeuralNet {
@@ -395,8 +414,8 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
 
         /*if requested precision is not supported, fallback to next available*/
         IBuilder* builder = createInferBuilder(logger);
-        if(float_type == FP8 && !builder->platformHasFastInt8()) {
-            if(builder->platformHasFastFp16()) {
+        if(float_type == FP8 && !hasFastInt8(dev_id)) {
+            if(hasFastFp16(dev_id)) {
                 float_type = FP16;
             } else {
                 float_type = FP32;
@@ -405,8 +424,8 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
                 float_type_string[float_type], dev_id);
             fflush(stdout);
         }
-        if(float_type == FP16 && !builder->platformHasFastFp16()) {
-            if(builder->platformHasFastInt8()) {
+        if(float_type == FP16 && !hasFastFp16(dev_id)) {
+            if(hasFastInt8(dev_id)) {
                 float_type = FP8;
             } else {
                 float_type = FP32;
@@ -512,7 +531,7 @@ void TrtModel::LoadGraph(int dev_id, int dev_type) {
         if(dev_id == N_DEVICES -1) {
             printf("%d. %s %d =",i,tensorName,(int)size);
             for(size_t j = start; j < d.nbDims; j++)
-                printf(" %d",d.d[j]);
+                printf(" %ld",d.d[j]);
             printf("\n");
             fflush(stdout);
         }
@@ -830,8 +849,8 @@ DLLExport void CDECL load_neural_network(
         get_perf(e);
         double ms = get_diff(s,e) / 1e8;
 
-        printf("DEV %d :  %.2f ms %.2f nps\n",
-            dev_id, ms, net->BATCH_SIZE * 1e3 / ms);
+        printf("DEV %d bench: %.2f evals/sec\n",
+            dev_id, net->BATCH_SIZE * 1e3 / ms);
         fflush(stdout);
 #else
         net->predict();
