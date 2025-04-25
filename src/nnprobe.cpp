@@ -941,27 +941,28 @@ RETRY:
     //choose GPU device
     Model* net = 0;
     {
-        int device_id = chosen_device;
         while(true) {
-            net = netModel[nn_id][device_id];
+            int device_id, start = chosen_device;
+            bool found = false;
+            for(int idx = 0; idx < N_DEVICES; idx++) {
+                device_id = (start + idx) % N_DEVICES;
+                net = netModel[nn_id][device_id];
 
-            if(!net->n_batch_eval && !net->n_finished_threads) {
-                if(l_add(net->n_batch_i, 1) < net->BATCH_SIZE) {
-                    if(scheduling == ROUNDROBIN) {
-                        device_id++;
-                        if(device_id == N_DEVICES)
-                            device_id = 0;
+                if(!net->n_batch_eval && !net->n_finished_threads) {
+                    if(l_add(net->n_batch_i, 1) < net->BATCH_SIZE) {
+                        if(scheduling == ROUNDROBIN)
+                            device_id = (start + idx + 1) % N_DEVICES;
+                        l_set(chosen_device, device_id);
+                        found = true;
+                        break;
+                    } else {
+                        l_add(net->n_batch_i, -1);
                     }
-                    l_set(chosen_device, device_id);
-                    break;
-                } else {
-                    l_add(net->n_batch_i, -1);
                 }
             }
+            if(found) break;
 
-            device_id++;
-            if(device_id == N_DEVICES)
-                device_id = 0;
+            //sleep
             SLEEP();
         }
     }
