@@ -122,8 +122,40 @@ public:
     virtual void predict() = 0;
     virtual void LoadGraph(int, int) = 0;
     static int dev_type;
+    /*conditional wait on evaluation*/
+    MUTEX wait_eval_lock;
+    COND  wait_eval_cond;
+
+    void signal_eval() {
+        std::lock_guard<std::mutex> lock(wait_eval_lock);
+        c_signal(wait_eval_cond);
+    }
+    void wait_eval() {
+        std::unique_lock<std::mutex> lk(wait_eval_lock);
+        c_wait(wait_eval_cond, lk,
+            [this]{return (n_finished_threads != 0);});
+    }
+    /*conditional wait on getting resources*/
+    static std::atomic_int n_idle_gpus;
+    static MUTEX wait_gpu_lock;
+    static COND  wait_gpu_cond;
+
+    static void signal_gpu() {
+        std::lock_guard<std::mutex> lock(wait_gpu_lock);
+        c_signal(wait_gpu_cond);
+    }
+    static void wait_gpu() {
+        std::unique_lock<std::mutex> lk(wait_gpu_lock);
+        c_wait(wait_gpu_cond, lk,
+            []{return n_idle_gpus != 0;});
+    }
 };
+
 int Model::dev_type;
+
+std::atomic_int Model::n_idle_gpus;
+MUTEX Model::wait_gpu_lock;
+COND Model::wait_gpu_cond;
 
 static Model** netModel[16];
 
@@ -781,6 +813,7 @@ DLLExport void CDECL load_neural_network(
     n_active_searchers = n_searchers;
     batch_size_factor = batch_size_factor_;
     scheduling = scheduling_;
+    Model::n_idle_gpus = N_DEVICES;
 
     NeuralNet* pnn = new NeuralNet();
 
@@ -963,7 +996,7 @@ RETRY:
             if(found) break;
 
             //sleep
-            SLEEP();
+            Model::wait_gpu();
         }
     }
 
@@ -997,8 +1030,12 @@ RETRY:
                 fflush(stdout);
 #endif
                 l_set(net->n_batch_eval, n_thread_batch);
+                l_add(Model::n_idle_gpus, -1);
                 net->predict();
                 break;
+            //sleep
+            } else {
+                net->wait_eval();
             }
 
         } while(net->n_finished_threads == 0);
@@ -1011,11 +1048,14 @@ RETRY:
         fflush(stdout);
 #endif
         net->n_batch_eval = n_thread_batch;
+        l_add(Model::n_idle_gpus, -1);
         net->predict();
     }
 
     //wake up other threads as soon as possible
     int prev_n = l_add(net->n_finished_threads, 1);
+    if(prev_n == 0)
+        net->signal_eval();
 
     //store in cache
     net->pnn->store_nn_cache(hash_key,p_index,p_size,p_outputs);
@@ -1027,6 +1067,8 @@ RETRY:
         l_add(net->n_batch_i, -prev_n);
         net->n_batch_eval = 0;
         net->n_finished_threads = 0;
+        l_add(Model::n_idle_gpus, 1);
+        Model::signal_gpu();
     }
 }
 
