@@ -996,7 +996,7 @@ RETRY:
                     (int)n_active_searchers, (int)n_searchers);
                 fflush(stdout);
 #endif
-                net->n_batch_eval = n_thread_batch;
+                l_set(net->n_batch_eval, n_thread_batch);
                 net->predict();
                 break;
             }
@@ -1014,17 +1014,20 @@ RETRY:
         net->predict();
     }
 
+    //wake up other threads as soon as possible
+    int prev_n = l_add(net->n_finished_threads, 1);
+
+    //store in cache
+    net->pnn->store_nn_cache(hash_key,p_index,p_size,p_outputs);
+
     //last thread to leave resets variables
-    int prev_n = l_add(net->n_finished_threads, 1) + 1;
+    ++prev_n;
     if(prev_n == net->n_batch_eval) {
         l_add(net->n_batch, -prev_n);
         l_add(net->n_batch_i, -prev_n);
         net->n_batch_eval = 0;
         net->n_finished_threads = 0;
     }
-
-    //store in cache
-    net->pnn->store_nn_cache(hash_key,p_index,p_size,p_outputs);
 }
 
 #undef SLEEP
