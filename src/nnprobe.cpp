@@ -981,11 +981,11 @@ RETRY:
                 device_id = (start + idx) % N_DEVICES;
                 net = netModel[nn_id][device_id];
 
-                if(!net->n_batch_eval && !net->n_finished_threads) {
+                if(!l_load(net->n_batch_eval) && !l_load(net->n_finished_threads)) {
                     if(l_add(net->n_batch_i, 1) < net->BATCH_SIZE) {
                         if(scheduling == ROUNDROBIN)
                             device_id = (start + idx + 1) % N_DEVICES;
-                        l_set(chosen_device, device_id);
+                        l_store(chosen_device, device_id);
                         found = true;
                         break;
                     } else {
@@ -1009,7 +1009,8 @@ RETRY:
         do {
 
             //a thread reached here after we started evaluating
-            if(net->n_batch_eval && (n_thread_batch > net->n_batch_eval)) {
+            int be = l_load(net->n_batch_eval);
+            if(be && (n_thread_batch > be)) {
                 l_add(net->n_batch, -1);
                 l_add(net->n_batch_i, -1);
                 goto RETRY;
@@ -1021,7 +1022,7 @@ RETRY:
             //this is the last active thread
             if(n_thread_batch == net->n_batch
                && n_active_searchers < n_searchers
-               && net->n_batch >= net->BATCH_SIZE - (n_searchers - n_active_searchers)
+               && l_load(net->n_batch) >= net->BATCH_SIZE - (n_searchers - n_active_searchers)
                ) {
 #if 0
                 printf("\n[part] # batchsize %d / %d  = active workers %d of %d\n",
@@ -1029,7 +1030,7 @@ RETRY:
                     (int)n_active_searchers, (int)n_searchers);
                 fflush(stdout);
 #endif
-                l_set(net->n_batch_eval, n_thread_batch);
+                l_store(net->n_batch_eval, n_thread_batch);
                 l_add(Model::n_idle_gpus, -1);
                 net->predict();
                 break;
@@ -1047,7 +1048,7 @@ RETRY:
             (int)n_active_searchers, (int)n_searchers);
         fflush(stdout);
 #endif
-        net->n_batch_eval = n_thread_batch;
+        l_store(net->n_batch_eval, n_thread_batch);
         l_add(Model::n_idle_gpus, -1);
         net->predict();
     }
@@ -1065,8 +1066,8 @@ RETRY:
     if(prev_n == net->n_batch_eval) {
         l_add(net->n_batch, -prev_n);
         l_add(net->n_batch_i, -prev_n);
-        net->n_batch_eval = 0;
-        net->n_finished_threads = 0;
+        l_store(net->n_batch_eval, 0);
+        l_store(net->n_finished_threads, 0);
         l_add(Model::n_idle_gpus, 1);
         Model::signal_gpu();
     }
@@ -1078,5 +1079,5 @@ RETRY:
    Set number of active workers
 */
 DLLExport void _CDECL set_num_active_searchers(int n_searchers) {
-    l_set(n_active_searchers,n_searchers);
+    l_store(n_active_searchers,n_searchers);
 }
