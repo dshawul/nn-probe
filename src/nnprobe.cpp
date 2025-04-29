@@ -1020,20 +1020,20 @@ RETRY:
             SLEEP();
 
             //this is the last active thread
-            if(n_thread_batch == net->n_batch
-               && n_active_searchers < n_searchers
-               && l_load(net->n_batch) >= net->BATCH_SIZE - (n_searchers - n_active_searchers)
-               ) {
+            int nb = l_load(net->n_batch), sd = n_searchers - l_load(n_active_searchers);
+            if(n_thread_batch == nb) {
+                if(sd > 0 && nb >= net->BATCH_SIZE - sd) {
 #if 0
-                printf("\n[part] # batchsize %d / %d  = active workers %d of %d\n",
-                    (int)net->n_batch, net->BATCH_SIZE,
-                    (int)n_active_searchers, (int)n_searchers);
-                fflush(stdout);
+                    printf("\n[part] # batchsize %d / %d  = active workers %d of %d\n",
+                        (int)net->n_batch, net->BATCH_SIZE,
+                        (int)n_active_searchers, (int)n_searchers);
+                    fflush(stdout);
 #endif
-                l_store(net->n_batch_eval, n_thread_batch);
-                l_add(Model::n_idle_gpus, -1);
-                net->predict();
-                break;
+                    l_store(net->n_batch_eval, n_thread_batch);
+                    l_add(Model::n_idle_gpus, -1);
+                    net->predict();
+                    break;
+                }
             //sleep
             } else {
                 net->wait_eval();
