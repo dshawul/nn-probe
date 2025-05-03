@@ -952,11 +952,6 @@ static int add_to_batch(Model* net, float** iplanes, float** p_outputs,
    Evaluate position using NN
 */
 
-#define SLEEP() {     \
-    t_yield();        \
-    t_sleep(delayms); \
-}
-
 DLLExport void  _CDECL probe_neural_network(
     float** iplanes, float** p_outputs,
     int* p_size, unsigned short** p_index, 
@@ -1007,7 +1002,6 @@ RETRY:
     if(n_thread_batch < net->BATCH_SIZE) {
 
         do {
-
             //a thread reached here after we started evaluating
             int be = l_load(net->n_batch_eval);
             if(be && (n_thread_batch > be)) {
@@ -1017,12 +1011,13 @@ RETRY:
             }
 
             //sleep
-            SLEEP();
+            t_yield();
+            t_sleep(delayms);
 
             //this is the last active thread
-            int nb = l_load(net->n_batch), sd = n_searchers - l_load(n_active_searchers);
-            if(n_thread_batch == nb) {
-                if(sd > 0 && nb >= net->BATCH_SIZE - sd) {
+            if(n_thread_batch == l_load(net->n_batch)) {
+                int sd = (n_searchers - l_load(n_active_searchers)) % net->BATCH_SIZE;
+                if(sd > 0 && n_thread_batch >= net->BATCH_SIZE - sd) {
 #if 0
                     printf("\n[part] # batchsize %d / %d  = active workers %d of %d\n",
                         (int)net->n_batch, net->BATCH_SIZE,
@@ -1034,9 +1029,10 @@ RETRY:
                     net->predict();
                     break;
                 }
-            //sleep
+            //sleep with cv
             } else {
                 net->wait_eval();
+                break;
             }
 
         } while(net->n_finished_threads == 0);
@@ -1072,8 +1068,6 @@ RETRY:
         Model::signal_gpu();
     }
 }
-
-#undef SLEEP
 
 /*
    Set number of active workers
