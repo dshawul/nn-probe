@@ -1001,45 +1001,43 @@ RETRY:
     //pause threads till eval completes
     if(n_thread_batch < net->BATCH_SIZE) {
 
-        do {
-            //a thread reached here after we started evaluating
-            int be = l_load(net->n_batch_eval);
-            if(be && (n_thread_batch > be)) {
-                l_add(net->n_batch, -1);
-                l_add(net->n_batch_i, -1);
-                goto RETRY;
-            }
+        //if a thread reached here after we started evaluating, undo
+        int be = l_load(net->n_batch_eval);
+        if(be && (n_thread_batch > be)) {
+            l_add(net->n_batch, -1);
+            l_add(net->n_batch_i, -1);
+            goto RETRY;
+        }
 
-            //sleep
-            t_yield();
-            t_sleep(delayms);
-
-            //this is the last active thread
-            if(n_thread_batch == l_load(net->n_batch)) {
+        //sleep all threads other than the polling thread
+        if(n_thread_batch != 1) {
+            net->wait_eval();
+        } else {
+            do {
+                //do partial batch evaluation
+                int nb = l_load(net->n_batch);
                 int sd = (n_searchers - l_load(n_active_searchers)) % net->BATCH_SIZE;
-                if(sd > 0 && n_thread_batch >= net->BATCH_SIZE - sd) {
+                if(sd > 0 && nb == net->BATCH_SIZE - sd) {
 #if 0
-                    printf("\n[part] # batchsize %d / %d  = active workers %d of %d\n",
+                    printf("# [part] batchsize %d / %d  = active workers %d of %d\n",
                         (int)net->n_batch, net->BATCH_SIZE,
                         (int)n_active_searchers, (int)n_searchers);
                     fflush(stdout);
 #endif
-                    l_store(net->n_batch_eval, n_thread_batch);
+                    l_store(net->n_batch_eval, nb);
                     l_add(Model::n_idle_gpus, -1);
                     net->predict();
                     break;
                 }
-            //sleep with cv
-            } else {
-                net->wait_eval();
-                break;
-            }
-
-        } while(net->n_finished_threads == 0);
+                //sleep
+                t_yield();
+                t_sleep(delayms);
+            } while(net->n_finished_threads == 0);
+        }
 
     } else {
 #if 0
-        printf("\n[full] # batchsize %d / %d  = active workers %d of %d\n",
+        printf("# [full] batchsize %d / %d  = active workers %d of %d\n",
             (int)net->n_batch, net->BATCH_SIZE,
             (int)n_active_searchers, (int)n_searchers);
         fflush(stdout);
